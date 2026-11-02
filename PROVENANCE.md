@@ -36,7 +36,17 @@ contains. The decoder is a restructured Odin port of libopus:
 - the Opus layer from `opus_decoder.c` and `opus_multistream_decoder.c`;
 - `tools/tables` copies the tables.
 
-The FFT and inverse MDCT are our own, written from the RFC's description. The
+The encoder ports libopus 1.6.1's float CELT encoder (`celt_encoder.c`,
+`bands.c`, `vq.c`, `cwrs.c`, `rate.c`, `quant_bands.c`, `pitch.c`,
+`laplace.c`, `entenc.c`), the signal-processing part of its tonality
+analysis (`analysis.c`, without the speech/music network) and the CELT-only
+Opus layer of `opus_encoder.c` (bandwidth, DC rejection). The band coding,
+allocation and pitch helpers are one path shared with the decoder. The PVQ
+search and the pitch correlations run in lanes of our own design (exact
+square roots where libopus's x86 code uses approximate ones, so output is
+the same on every CPU).
+
+The FFT and the MDCTs are our own, written from the RFC's description. The
 Ogg reader follows RFC 3533 and Ogg Opus RFC 7845.
 
 ### WebP

@@ -1,7 +1,7 @@
 # Opus
 
 Opus (RFC 6716, with the RFC 8251 updates) decoding to 48 kHz `f32`, from
-any container's packets. `video.Reader` reads it from Ogg (`.opus`, `.ogg`,
+any container's packets, and CELT-only encoding (see [Encoding](#encoding)). `video.Reader` reads it from Ogg (`.opus`, `.ogg`,
 through [`ogg`](../../container/ogg)) and from WebM/Matroska
 (`A_OPUS`).
 
@@ -45,6 +45,59 @@ A single stream can be decoded directly too: `Decoder`, `init_decoder`,
   - pre-skip (Ogg) and `CodecDelay` (Matroska) are trimmed, and so is the end, by Ogg's last granule position;
   - seeks decode 80 ms ahead of the target (RFC 7845 4.6).
 
+## Encoding
+
+```odin
+config := opus.default_encoder_config(2)  // VBR, complexity 9, 20 ms, 64 kb/s per channel
+config.bit_rate = 128000
+config.lsb_depth = 16                       // for 16-bit sources (24 for float, the default)
+e: opus.Encoder
+err := opus.init_encoder(&e, config)
+head: [19]u8
+opus.write_head(head[:], 2)                 // OpusHead: pre-skip ENCODER_PRE_SKIP (120)
+bytes, err := opus.encode_packet(&e, pcm[:960 * 2], packet[:]) // interleaved +-1; MAX_PACKET_BYTES suffice
+```
+
+The encoder is libopus's float CELT encoder, for music and mixed sound:
+- mono or stereo at 48 kHz; frames of 2.5, 5, 10 or 20 ms, one per packet;
+- VBR, constrained VBR or CBR from 6 to 510 kb/s, complexity 0 to 10 as libopus;
+- the bandwidth from the rate as libopus picks it for music (full band from
+  12 kb/s), narrowed per frame to a band-limited signal's;
+- from complexity 5 the pitch prefilter (the decoder's postfilter inverted),
+  and from 7 the tonality analysis that drives the VBR target, the band
+  boosts and the bandwidth (libopus's, without its speech/music network: a
+  CELT-only encoder has no mode to choose); 8 and up code stereo angles both
+  ways and keep the closer;
+- no SILK or hybrid (speech at low rates), no multistream, no FEC or DTX.
+
+The band coding, bit allocation, time-frequency changes, comb filter and
+pitch search are the decoder's own procs: `Band_Ctx($R)` and friends take
+`Range_Decoder` or `Range_Encoder`, and `when` adds what only the encoder
+does (the PVQ search, the split angles, intensity stereo), so the decoder
+compiles as before and the encoder reconstructs exactly what the decoder
+will.
+
+`bash tests/opus_encode_check.sh` (fixtures from `tests/opus_fixtures.sh`):
+- 648 configurations (vectors 01, 07 and 11; mono and stereo; 16 to 256 kb/s;
+  VBR, constrained VBR and CBR; complexity 0, 5 and 10; 2.5, 10 and 20 ms
+  frames): every packet decodes to the encoder's final range in libopus's
+  `opus_demo` and in this decoder;
+- against libopus's CELT-only encoder (`restricted-celt`, complexity 9) on a
+  minute of music: VBR at the same rate to 0.01 kb/s and 0.00 to 0.03 dB
+  higher SNR, 32 to 192 kb/s; CBR within 0.03 dB;
+- a `-microarch:native` build writes the same bytes;
+- a VP9 and Opus WebM from `video.Writer` decodes in FFmpeg to the source's
+  sample count.
+`odin test audio/opus` round-trips every mode, complexity and frame size
+through the decoder, final range by final range.
+
+On one core, encoding that minute at 128 kb/s takes about as many cycles as
+libopus with its SSE and AVX2 code (1.41G against 1.38G at complexity 9;
+1.03G against 0.93G at 5). The time went into data shape: the PVQ pulse
+search keeps a best score and index per lane, the pitch search correlates
+eight lags at once (each lane summing in order, so the result is the scalar
+one), and the long inner products sum in eight lanes.
+
 ## Layout
 
 The SILK, CELT and resampler tables are generated from libopus by
@@ -53,7 +106,7 @@ of different sizes) are CSR: one flat array of values and one of row
 offsets. SILK runs in libopus's exact fixed point, so it is bit-exact.
 CELT runs in `f32`, so it matches libopus to rounding.
 
-The MDCT tables are computed once at startup and shared by every decoder.
+The MDCT tables are computed once at startup and shared by every decoder and encoder.
 
 ## Verification
 
