@@ -6,7 +6,8 @@ import "core:math"
 import "core:os"
 import "base:intrinsics"
 
-// Video-only VP9 or AV1. Timestamps and durations at the API boundary are nanoseconds.
+// VP9 or AV1 video, with an Opus audio track when audio_channels > 0.
+// Timestamps and durations at the API boundary are nanoseconds.
 Writer_Config :: struct {
 	width, height:    int,
 	codec:            Codec, // .Unknown or .VP9 writes V_VP9; .AV1 writes V_AV1
@@ -14,6 +15,9 @@ Writer_Config :: struct {
 	alpha:            bool,
 	default_duration: i64,
 	chapters:         []Chapter,
+	audio_channels:   int, // 1 or 2: an A_OPUS track at 48 kHz
+	audio_private:    []u8, // its OpusHead
+	audio_delay:      i64, // CodecDelay: the pre-skip in ns
 }
 
 Writer :: struct {
@@ -26,8 +30,9 @@ Writer :: struct {
 	cluster_start, cluster_payload, cluster_time: i64,
 	cue_seek_at, duration_at, chapter_end_at: i64,
 	last_pts, end_pts, last_chapter_ns: i64,
+	audio_last_pts: i64,
 	last_chapter_start: f64,
-	have_sample, failed, finished, initialized: bool,
+	have_sample, have_audio, failed, finished, initialized: bool,
 }
 
 @(private)
@@ -46,8 +51,9 @@ create :: proc(w: ^Writer, path: string, config: Writer_Config) -> Error {
 create_stream :: proc(w: ^Writer, stream: io.Stream, config: Writer_Config) -> Error {
 	if w == nil || config.width <= 0 || config.height <= 0 || config.width > 65536 || config.height > 65536 || config.default_duration < 0 do return .Invalid_Argument
 	if config.codec != .Unknown && config.codec != .VP9 && config.codec != .AV1 do return .Invalid_Argument
+	if config.audio_channels < 0 || config.audio_channels > 2 || (config.audio_channels > 0) != (len(config.audio_private) > 0) || config.audio_delay < 0 do return .Invalid_Argument
 	if !common.validate_chapters(config.chapters) do return .Invalid_Argument
-	extra := len(config.codec_private)
+	extra := len(config.codec_private) + len(config.audio_private)
 	for c, i in config.chapters {
 		if c.start >= 9e9 do return .Invalid_Argument
 		if i > 0 && u64(math.round(c.start * 1e9)) <= u64(math.round(config.chapters[i - 1].start * 1e9)) {
@@ -97,7 +103,21 @@ create_stream :: proc(w: ^Writer, stream: io.Stream, config: Writer_Config) -> E
 	colour := writer_begin(b, 0x55B0)
 	writer_uint(b, 0x55B1, 1); writer_uint(b, 0x55B2, 8)
 	writer_uint(b, 0x55B9, 1); writer_uint(b, 0x55BA, 1); writer_uint(b, 0x55BB, 1)
-	writer_end(b, colour); writer_end(b, video); writer_end(b, track); writer_end(b, tracks)
+	writer_end(b, colour); writer_end(b, video); writer_end(b, track)
+	if config.audio_channels > 0 {
+		audio := writer_begin(b, 0xAE)
+		writer_uint(b, 0xD7, 2); writer_uint(b, 0x73C5, 2); writer_uint(b, 0x83, 2)
+		writer_uint(b, 0x9C, 0)
+		writer_bytes(b, 0x86, transmute([]u8)string("A_OPUS"))
+		writer_bytes(b, 0x63A2, config.audio_private)
+		writer_uint(b, 0x56AA, u64(config.audio_delay)) // CodecDelay
+		writer_uint(b, 0x56BB, 80_000_000) // SeekPreRoll: Opus needs 80 ms to converge
+		settings := writer_begin(b, 0xE1)
+		writer_id(b, 0xB5); writer_size(b, 8); writer_be(b, transmute(u64)f64(48000), 8)
+		writer_uint(b, 0x9F, u64(config.audio_channels))
+		writer_end(b, settings); writer_end(b, audio)
+	}
+	writer_end(b, tracks)
 	if len(config.chapters) > 0 {
 		chapters_pos := len(b^)
 		chapters := writer_begin(b, 0x1043A770)
@@ -144,16 +164,8 @@ write_sample :: proc(w: ^Writer, packet: []u8, pts: i64, keyframe: bool, alpha: 
 	// Every append below then stays within capacity; failure changes nothing.
 	if reserve(&w.scratch, len(packet) + len(alpha) + 128) != nil do return .Out_Of_Memory
 	if keyframe && reserve(&w.cues, len(w.cues) + 1) != nil do return .Out_Of_Memory
-	if w.cluster_start < 0 || keyframe || tick - w.cluster_time > 32767 {
-		writer_close_cluster(w) or_return
-		w.cluster_start = w.position
-		w.cluster_time = tick
-		b := &w.scratch
-		writer_begin(b, 0x1F43B675)
-		w.cluster_payload = w.position + i64(len(b^))
-		writer_uint(b, 0xE7, u64(tick))
-		writer_flush(w) or_return
-	}
+	// A keyframe starts a Cluster, unless audio at the same tick just did.
+	if w.cluster_start < 0 || (keyframe && tick != w.cluster_time) || tick < w.cluster_time || tick - w.cluster_time > 32767 do writer_open_cluster(w, tick) or_return
 	if keyframe do append(&w.cues, Writer_Cue{u64(tick), u64(w.cluster_start - w.segment_payload)})
 	b := &w.scratch
 	group := -1
@@ -180,7 +192,40 @@ write_sample :: proc(w: ^Writer, packet: []u8, pts: i64, keyframe: bool, alpha: 
 	writer_flush(w) or_return
 	w.have_sample = true
 	w.last_pts = pts
-	w.end_pts = pts + frame_duration
+	w.end_pts = max(w.end_pts, pts + frame_duration)
+	return .None
+}
+
+// One Opus packet at pts (ns; increasing), all its samples played unless
+// `discard` (ns) trims the end of the last one. It joins the open Cluster,
+// before its start too (block times are signed), so Cluster times only
+// increase; a Cluster opens only beyond 32767 ticks either way. Audio is best
+// written before or alongside the video it accompanies.
+write_audio_sample :: proc(w: ^Writer, packet: []u8, pts, duration: i64, discard: i64 = 0) -> Error {
+	if w == nil || !w.initialized || w.finished do return .Closed
+	if w.failed do return .IO_Error
+	if w.config.audio_channels == 0 || len(packet) == 0 || pts < 0 || duration <= 0 || discard < 0 || (w.have_audio && pts <= w.audio_last_pts) || pts > max(i64) - duration do return .Invalid_Argument
+	tick := pts / 1_000_000
+	if reserve(&w.scratch, len(packet) + 64) != nil do return .Out_Of_Memory
+	if w.cluster_start < 0 || tick - w.cluster_time < -32768 || tick - w.cluster_time > 32767 do writer_open_cluster(w, tick) or_return
+	b := &w.scratch
+	group := -1
+	if discard > 0 do group = writer_begin(b, 0xA0)
+	writer_id(b, discard > 0 ? 0xA1 : 0xA3)
+	writer_size(b, u64(len(packet) + 4))
+	append(b, 0x82)
+	writer_be(b, u64(tick - w.cluster_time), 2)
+	append(b, discard > 0 ? u8(0) : 0x80) // every Opus packet is a keyframe
+	append(b, ..packet)
+	if discard > 0 {
+		writer_sint(b, 0x75A2, discard) // DiscardPadding: signed
+		writer_end(b, group)
+	}
+	writer_flush(w) or_return
+	w.have_audio = true
+	w.audio_last_pts = pts
+	// Presented: CodecDelay's samples are discarded at the start.
+	w.end_pts = max(w.end_pts, pts + duration - discard - w.config.audio_delay)
 	return .None
 }
 
@@ -230,6 +275,18 @@ destroy :: proc(w: ^Writer) {
 	if w.file != nil do os.close(w.file)
 	delete(w.scratch); delete(w.cues)
 	w^ = {}
+}
+
+@(private)
+writer_open_cluster :: proc(w: ^Writer, tick: i64) -> Error {
+	writer_close_cluster(w) or_return
+	w.cluster_start = w.position
+	w.cluster_time = tick
+	b := &w.scratch
+	writer_begin(b, 0x1F43B675)
+	w.cluster_payload = w.position + i64(len(b^))
+	writer_uint(b, 0xE7, u64(tick))
+	return writer_flush(w)
 }
 
 @(private)
@@ -301,6 +358,14 @@ writer_end :: proc(b: ^[dynamic]u8, at: int) {
 writer_uint :: proc(b: ^[dynamic]u8, id: u32, value: u64) {
 	bytes := max(1, int((64 - intrinsics.count_leading_zeros(value) + 7) / 8))
 	writer_id(b, id); writer_size(b, u64(bytes)); writer_be(b, value, bytes)
+}
+
+// A signed integer: the fewest bytes whose top bit still carries the sign.
+@(private)
+writer_sint :: proc(b: ^[dynamic]u8, id: u32, value: i64) {
+	bytes := 1
+	for bytes < 8 && (value < -(i64(1) << uint(8 * bytes - 1)) || value >= i64(1) << uint(8 * bytes - 1)) do bytes += 1
+	writer_id(b, id); writer_size(b, u64(bytes)); writer_be(b, cast(u64)value, bytes)
 }
 
 @(private)

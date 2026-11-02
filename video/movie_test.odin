@@ -159,15 +159,17 @@ round_trip :: proc(t: ^testing.T, codec: Video_Codec) {
 	testing.expect_value(t, r.video.fps_num, FPS)
 	testing.expect_value(t, r.video.fps_den, 1)
 	testing.expect_value(t, r.video.color, BT709_LIMITED)
-	testing.expect(t, abs(r.video.duration - f64(FRAMES) / FPS) < 1e-9)
-	testing.expect(t, r.audio.demux.tracks[r.video_index].no_reordering)
+	// WebM timestamps are whole milliseconds.
+	tolerance := codec == .VP9 ? 1e-3 : 1e-9
+	testing.expect(t, abs(r.video.duration - f64(FRAMES) / FPS) < tolerance)
+	if codec != .VP9 do testing.expect(t, r.audio.demux.tracks[r.video_index].no_reordering)
 
 	// Sequential playback.
 	for i in 0 ..< FRAMES {
 		f, err := next_frame(&r)
 		testing.expect_value(t, err, Error.None)
 		testing.expect_value(t, f.index, i)
-		testing.expect(t, abs(f.time - f64(i) / FPS) < 1e-9)
+		testing.expect(t, abs(f.time - f64(i) / FPS) < tolerance)
 		quality := psnr(frames[i], f.rgba, W, H)
 		testing.expectf(t, quality > 32, "frame %d psnr %v", i, quality)
 	}
@@ -229,7 +231,11 @@ round_trip :: proc(t: ^testing.T, codec: Video_Codec) {
 	testing.expect_value(t, n, 256)
 	worst: f32
 	for v, i in chunk do worst = max(worst, abs(v - decoded[position * CHANNELS + i]))
-	testing.expectf(t, worst < 1e-3, "seek mismatch %v", worst)
+	// Opus decoders converge over the pre-roll rather than match: 80 ms
+	// after a seek, libopus differs as much on this tone (its postfilter's
+	// memory).
+	seek_tolerance: f32 = codec == .VP9 ? 0.08 : 1e-3
+	testing.expectf(t, worst < seek_tolerance, "seek mismatch %v", worst)
 }
 
 @(test)
@@ -265,6 +271,49 @@ test_h265_movie_round_trip :: proc(t: ^testing.T) {
 @(test)
 test_av1_movie_round_trip :: proc(t: ^testing.T) {
 	round_trip(t, .AV1)
+}
+
+// WebM's Opus reads back at exactly the samples written, whatever the last
+// frame's fill (the drain decision flips at 840; DiscardPadding's top bit is
+// set for some of these), with audio shorter than the video, and none.
+@(test)
+test_vp9_opus_lengths :: proc(t: ^testing.T) {
+	FPS, FRAMES :: 30, 30
+	for samples in ([?]int{48000, 48001, 48002, 48003, 48200, 48403, 48805, 48840, 48841, 48959, 24000, 0}) {
+		m: mp4.Memory_Stream
+		defer delete(m.data)
+		config := default_writer_config(32, 32, FPS, 1)
+		config.codec, config.preference = .VP9, .Native
+		config.sample_rate, config.channels = 48000, 2
+		w: Writer
+		testing.expect_value(t, create_stream(&w, mp4.memory_stream(&m), config), Error.None)
+		pcm := make([]f32, samples * 2)
+		defer delete(pcm)
+		for i in 0 ..< samples do pcm[2 * i], pcm[2 * i + 1] = tone(i, 0, 48000), tone(i, 1, 48000)
+		rgba := make([]u8, 32 * 32 * 4)
+		defer delete(rgba)
+		// In step: each frame's audio, then the frame.
+		per := 48000 / FPS
+		for f in 0 ..< FRAMES {
+			at, end := min(f * per, samples), min((f + 1) * per, samples)
+			if f == FRAMES - 1 do end = samples
+			testing.expect_value(t, write_audio(&w, pcm[at * 2:end * 2]), Error.None)
+			testing.expect_value(t, write_frame(&w, rgba, 32 * 4), Error.None)
+		}
+		testing.expect_value(t, finish(&w), Error.None)
+		destroy(&w)
+		r: Reader
+		testing.expect_value(t, open_reader_stream(&r, mp4.memory_stream(&m), {preference = .Native}), Error.None)
+		defer close_reader(&r)
+		testing.expect_value(t, r.video.frame_count, FRAMES)
+		testing.expectf(t, r.audio.samples == i64(samples), "%d samples written, %d read", samples, r.audio.samples)
+	}
+}
+
+// WebM with Opus audio.
+@(test)
+test_vp9_movie_round_trip :: proc(t: ^testing.T) {
+	round_trip(t, .VP9)
 }
 
 @(test)

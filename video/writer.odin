@@ -11,6 +11,7 @@ import audiotoolbox "../media/audiotoolbox"
 import avcodec "../media/avcodec"
 import mediafoundation "../media/mediafoundation"
 import native "../media/native"
+import opus "../audio/opus"
 import videotoolbox "../media/videotoolbox"
 import vulkan "../media/vulkan"
 import webm "../container/webm"
@@ -21,7 +22,7 @@ Video_Codec :: enum u8 {
 	H264,
 	H265,
 	ProRes, // reading only
-	VP9,    // written to WebM (native encoder, no audio); alpha needs transparency Straight
+	VP9,    // written to WebM (native encoder, audio as Opus); alpha needs transparency Straight
 	AV1,    // written to MP4 (native encoder); decoded via Vulkan Video or native
 }
 
@@ -44,8 +45,8 @@ Writer_Config :: struct {
 	// transparent video. The value is how colour is stored beside it.
 	transparency:          Transparency,
 	faststart:             bool, // moov before mdat, for progressive playback
-	// Audio: interleaved f32 PCM at a standard AAC rate; zero sample_rate
-	// writes no audio track.
+	// Audio: interleaved f32 PCM at a standard AAC rate (VP9's WebM: Opus, at
+	// 48 kHz, mono or stereo); zero sample_rate writes no audio track.
 	sample_rate, channels: int,
 	audio_bit_rate:        int, // 0 selects 64 kb/s per channel
 	ultrafast:             bool, // prefer encode speed over size (media.Config.ultrafast)
@@ -82,7 +83,7 @@ Writer :: struct {
 	alpha_plane:    []u8, // with transparency: full-range alpha, luma-sized
 	alpha_scratch:  Alpha_Scratch,
 	coefficients:   Rgb_To_Yuv,
-	pcm:            []f32, // one AAC frame of pending input
+	pcm:            []f32, // one AAC or Opus frame of pending input
 	pcm_fill:       int, // samples per channel in pcm
 	aac_order:      [8]u8, // AAC channel j takes WAVE-order input channel aac_order[j]
 	reorder:        bool,
@@ -90,6 +91,7 @@ Writer :: struct {
 	queue:          [dynamic]u8, // encoded audio waiting to interleave
 	queued:         [dynamic]Queued_Audio,
 	queue_head:     int,
+	audio_discard:  i64, // WebM: padding samples the last Opus packet drops
 	err:            Error,
 	error_detail:   string, // static diagnostic for the last failure
 	open:           bool,
@@ -184,7 +186,10 @@ create_output :: proc(w: ^Writer, config: Writer_Config, path: string, stream: i
 			if c.alpha == .Opaque do return .Invalid_Config
 		}
 		if c.gop == 0 do c.gop = max(1, (c.fps_num + c.fps_den / 2) / c.fps_den)
-		if w.has_audio && c.codec == .VP9 do return .Unsupported // WebM audio would need an Opus encoder
+		if w.has_audio && c.codec == .VP9 && (c.sample_rate != 48000 || c.channels < 1 || c.channels > 2) {
+			w.error_detail = "WebM audio is Opus: 48 kHz, mono or stereo"
+			return .Unsupported
+		}
 		// Video ticks: the frame rate's numerator doubled up to at least 10 kHz,
 		// so every frame lasts an exact integer number of ticks.
 		timescale := c.fps_num
@@ -208,7 +213,7 @@ create_output :: proc(w: ^Writer, config: Writer_Config, path: string, stream: i
 			when !native.OICUT_NATIVE_H265 do if c.codec == .H265 do w.error_detail = "no VideoToolbox, Vulkan Video or libavcodec H.265 encoder admits this configuration, and native H.265 is not built in (-define:OICUT_PATENTED=true)"
 			return media_error(e)
 		}
-		if c.codec == .VP9 do return create_webm(w, path, stream)
+		if c.codec == .VP9 do return create_webm(w, path, stream, providers[:])
 	} else {
 		if c.transparency != .None || c.codec == .VP9 do return .Invalid_Config
 	}
@@ -295,22 +300,41 @@ create_output :: proc(w: ^Writer, config: Writer_Config, path: string, stream: i
 	return .None
 }
 
-// The WebM side of create: video only, timed in nanoseconds.
+// The WebM side of create: VP9 and Opus, timed in nanoseconds.
 @(private)
-create_webm :: proc(w: ^Writer, path: string, stream: io.Stream) -> Error {
+create_webm :: proc(w: ^Writer, path: string, stream: io.Stream, providers: []media.Provider) -> Error {
 	c := &w.config
 	config := webm.Writer_Config {
-		width    = c.width,
-		height   = c.height,
-		alpha    = c.transparency != .None,
-		chapters = c.chapters,
+		width            = c.width,
+		height           = c.height,
+		alpha            = c.transparency != .None,
+		chapters         = c.chapters,
+		// Exact, where block timestamps are whole milliseconds.
+		default_duration = i64((i128(c.fps_den) * 1_000_000_000 + i128(c.fps_num) / 2) / i128(c.fps_num)),
+	}
+	head: [19]u8
+	if w.has_audio {
+		audio := media.default_config(.Opus, .Encode)
+		audio.sample_rate, audio.channels, audio.bit_rate = c.sample_rate, c.channels, c.audio_bit_rate
+		if e := media.open(&w.audio, audio, providers); e != .None {
+			media.close(&w.video)
+			w.error_detail = "Opus encoder refused the audio configuration"
+			return media_error(e)
+		}
+		opus.write_head(head[:], c.channels)
+		config.audio_channels = c.channels
+		config.audio_private = head[:]
+		config.audio_delay = samples_ns(opus.ENCODER_PRE_SKIP)
 	}
 	e := stream.procedure != nil ? webm.create_stream(&w.webm, stream, config) : webm.create(&w.webm, path, config)
 	if e != .None {
 		media.close(&w.video)
+		media.close(&w.audio)
 		w.error_detail = "could not create the output file"
 		return container_error(e)
 	}
+	// As create_output: the buffers once nothing can fail.
+	if w.has_audio do w.pcm = make([]f32, 960 * c.channels)
 	open_frames(w)
 	return .None
 }
@@ -469,7 +493,15 @@ flush_audio :: proc(w: ^Writer, video: i64, seconds: f64) {
 	for w.queue_head < len(w.queued) && w.err == .None {
 		q := w.queued[w.queue_head]
 		if seconds >= 0 && !audio_before(w, q.pts, video, seconds) do break
-		if e := mp4.write_audio_packet(&w.mux, w.audio_track, w.queue[q.offset:][:q.size], q.pts); e != .None {
+		data := w.queue[q.offset:][:q.size]
+		if w.config.codec == .VP9 {
+			// 20 ms packets; the last one drops the padding.
+			discard := w.queue_head == len(w.queued) - 1 ? samples_ns(w.audio_discard) : 0
+			if e := webm.write_audio_sample(&w.webm, data, samples_ns(q.pts), samples_ns(960), discard); e != .None {
+				w.err = container_error(e)
+				return
+			}
+		} else if e := mp4.write_audio_packet(&w.mux, w.audio_track, data, q.pts); e != .None {
 			w.err = mp4_error(e)
 			return
 		}
@@ -529,7 +561,7 @@ encode_pcm :: proc(w: ^Writer) -> Error {
 		samples             = w.pcm,
 		sample_rate         = w.config.sample_rate,
 		channels            = w.config.channels,
-		samples_per_channel = 1024,
+		samples_per_channel = len(w.pcm) / w.config.channels,
 	}
 	if e := media.encode_audio(&w.audio, frame, {packet = on_audio_packet, user = w}); e != .None {
 		w.error_detail = w.audio.error_detail
@@ -550,11 +582,15 @@ finish :: proc(w: ^Writer) -> Error {
 			for &v in w.pcm[w.pcm_fill * w.config.channels:] do v = 0
 			encode_pcm(w) or_return
 		}
-		if e := media.drain(&w.audio, {packet = on_audio_packet, user = w}); e != .None {
-			w.err = media_error(e)
-			return w.err
+		if w.config.codec == .VP9 {
+			finish_opus(w) or_return
+		} else {
+			if e := media.drain(&w.audio, {packet = on_audio_packet, user = w}); e != .None {
+				w.err = media_error(e)
+				return w.err
+			}
+			if e := mp4.set_track_end(&w.mux, w.audio_track, w.pcm_total); e != .None do return mp4_error(e)
 		}
-		if e := mp4.set_track_end(&w.mux, w.audio_track, w.pcm_total); e != .None do return mp4_error(e)
 	}
 	if w.has_video {
 		if e := media.drain(&w.video, {packet = on_video_packet, user = w}); e != .None {
@@ -607,12 +643,40 @@ video_backend :: proc(w: ^Writer) -> (media.Backend, string) {
 // nanoseconds from the exact frame rate.
 @(private)
 add_vp9_packet :: proc(w: ^Writer, packet: media.Packet) {
+	// The audio up to this frame first, so clusters keep time order.
+	ticks := w.samples * w.frame_duration
+	if w.queue_head < len(w.queued) && audio_before(w, w.queued[w.queue_head].pts, ticks, 0) do flush_audio(w, ticks, 0)
+	if w.err != .None do return
 	pts, next := frame_time_ns(w, w.samples), frame_time_ns(w, w.samples + 1)
 	if e := webm.write_sample(&w.webm, packet.data, pts, packet.keyframe, packet.alpha, next - pts); e != .None {
 		w.err = container_error(e)
 		return
 	}
 	w.samples += 1
+}
+
+// Samples at 48 kHz in nanoseconds.
+@(private)
+samples_ns :: proc(samples: i64) -> i64 {
+	return i64(i128(samples) * 1_000_000_000 / 48000)
+}
+
+// Opus output lags its input by the pre-skip: one more frame (the drain's
+// silence) only where the last frame's padding does not cover it, and what
+// runs past the input, under one packet, discarded from the last.
+@(private)
+finish_opus :: proc(w: ^Writer) -> Error {
+	if w.pcm_total == 0 do return .None
+	frames := (w.pcm_total + 959) / 960
+	if tail := w.pcm_total % 960; tail == 0 || tail > 960 - opus.ENCODER_PRE_SKIP {
+		if e := media.drain(&w.audio, {packet = on_audio_packet, user = w}); e != .None {
+			w.err = media_error(e)
+			return w.err
+		}
+		frames += 1
+	}
+	w.audio_discard = frames * 960 - opus.ENCODER_PRE_SKIP - w.pcm_total
+	return .None
 }
 
 @(private)

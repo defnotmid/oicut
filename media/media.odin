@@ -13,7 +13,7 @@ Codec :: enum {
 	FLAC,   // decode only; one frame per packet (Framing.Frame), streaminfo in Config.extradata
 	MP3,    // decode only; MPEG-1/2/2.5 Layer III, one frame per packet (Framing.Frame)
 	AV1,    // one temporal unit per packet (Framing.Frame); native supports Profiles 0-2, Vulkan Video decodes Main 4:2:0 8/10-bit
-	Opus,   // decode only, 48 kHz; one packet per Packet (Framing.Frame), OpusHead in Config.extradata; channels in the Opus mapping order
+	Opus,   // 48 kHz; one packet per Packet (Framing.Frame); decode: OpusHead in Config.extradata, channels in the Opus mapping order; encode (native): mono or stereo, 960 samples per frame, CELT-only
 	ALAC,   // decode only; one packet per Packet (Framing.Frame), 24-byte ALACSpecificConfig in Config.extradata
 	Vorbis, // decode only; one packet per Packet (Framing.Frame), the three headers Xiph-laced in Config.extradata (Matroska's CodecPrivate)
 }
@@ -246,8 +246,10 @@ default_config :: proc(codec: Codec, operation: Operation) -> Config {
 
 validate_config :: proc(config: Config) -> Error {
 	if config.codec == .Opus {
-		if config.channels < 1 || config.channels > 255 || config.sample_rate != 48000 do return .Invalid_Config // multistream
-		return config.operation == .Decode ? .None : .Unsupported
+		if config.channels < 1 || config.channels > 255 || config.sample_rate != 48000 || config.bit_rate < 0 do return .Invalid_Config // multistream
+		// Encoding: CELT-only mono or stereo in 20 ms packets.
+		if config.operation == .Encode && (config.channels > 2 || (config.frame_samples != 0 && config.frame_samples != 960) || len(config.extradata) != 0) do return .Unsupported
+		return .None
 	}
 	if config.codec == .FLAC || config.codec == .MP3 || config.codec == .ALAC {
 		if config.channels < 1 || config.channels > (config.codec == .MP3 ? 2 : 8) || config.sample_rate <= 0 do return .Invalid_Config
@@ -383,8 +385,9 @@ encode_audio :: proc(session: ^Session, frame: Audio_Frame, receiver: Receiver) 
 	if err := begin_call(session, .Encode); err != .None do return err
 	defer session.busy = false
 	context.allocator = session.allocator
-	if session.config.codec != .AAC || session.audio_impl == nil do return .Wrong_Operation
-	n := session.config.frame_samples == 0 ? 1024 : session.config.frame_samples
+	if (session.config.codec != .AAC && session.config.codec != .Opus) || session.audio_impl == nil do return .Wrong_Operation
+	// AAC frames are 1024 samples (or 960); Opus's 960 (20 ms).
+	n := session.config.frame_samples != 0 ? session.config.frame_samples : (session.config.codec == .Opus ? 960 : 1024)
 	if frame.sample_rate != session.config.sample_rate || frame.channels != session.config.channels || frame.samples_per_channel != n || len(frame.samples) != n * frame.channels do return .Invalid_Input
 	err := session.audio_impl(session, frame, receiver)
 	if err == .Codec_Error || err == .Driver_Error do session.failed = true

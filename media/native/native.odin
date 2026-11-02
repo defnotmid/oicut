@@ -14,6 +14,7 @@ import av1d "../../video/av1/decoder"
 import av1e "../../video/av1/encoder"
 import vp9d "../../video/vp9/decoder"
 import vp9e "../../video/vp9/encoder"
+import opus "../../audio/opus"
 
 // Compile-time patent/bundling gates for software H.264 and H.265.
 // Native software H.264 and H.265 are omitted by default so `media` routes
@@ -126,6 +127,10 @@ probe :: proc(config: media.Config, user: rawptr) -> media.Error {
 	case .AV1:
 		// Profiles 0, 1, 2 (8/10/12-bit, monochrome / 4:2:0 / 4:2:2 / 4:4:4) for decode and encode.
 	case .FLAC, .MP3, .Opus, .ALAC, .Vorbis:
+		if config.codec == .Opus && config.operation == .Encode {
+			if config.bit_rate != 0 && (config.bit_rate < 6000 || config.bit_rate > 510000) do return .Invalid_Config
+			break
+		}
 		// Decoded by the audio package, the one audio decode implementation.
 		switch audio.check_config(AUDIO_CODECS[config.codec], config.sample_rate, config.channels, config.extradata) {
 		case .None:
@@ -186,6 +191,8 @@ State :: struct {
 	alpha_input:        []u16, // the alpha plane, then flat chroma planes
 	joined:             [dynamic]u8, // both layers' access unit
 	aac_encoder:        ^aace.Encoder,
+	opus_encoder:       ^opus.Encoder,
+	opus_packet:        [opus.MAX_PACKET_BYTES]u8,
 	prores_decoder:     ^proresd.Decoder,
 	vp9_decoder:        ^vp9d.Decoder,
 	vp9_alpha:          ^vp9d.Decoder, // the alpha stream, opened on its first packet
@@ -252,8 +259,15 @@ open_native :: proc(session: ^media.Session, config: media.Config, user: rawptr)
 	}
 	if config.codec == .H265 do s.encoded = make([dynamic]u8, 0, 65536)
 	switch config.codec {
-	case .ProRes, .FLAC, .MP3, .Opus, .ALAC, .Vorbis:
+	case .ProRes, .FLAC, .MP3, .ALAC, .Vorbis:
 		return .Unsupported // probe admits these for decoding only
+	case .Opus:
+		cfg := opus.default_encoder_config(config.channels)
+		cfg.bit_rate = config.bit_rate
+		s.opus_encoder = new(opus.Encoder)
+		if s.opus_encoder == nil {session.error_detail = "Opus encoder allocation failed"; return .Codec_Error}
+		if opus.init_encoder(s.opus_encoder, cfg) != .None {session.error_detail = "Opus encoder refused the configuration"; return .Invalid_Config}
+		return .None
 	case .VP9:
 		return open_vp9_encoders(session, s, config, options)
 	case .AV1:
@@ -380,6 +394,7 @@ close_native :: proc(session: ^media.Session) {
 	if s.av1_encoder != nil {av1e.destroy_encoder(s.av1_encoder); free(s.av1_encoder)}
 	if s.audio_decoder != nil {audio.destroy_decoder(s.audio_decoder); free(s.audio_decoder)}
 	if s.aac_encoder != nil {aace.destroy_encoder(s.aac_encoder); free(s.aac_encoder)}
+	free(s.opus_encoder)
 	delete(s.encoded); delete(s.decoded); delete(s.input); delete(s.pcm)
 	free(s)
 }
@@ -962,10 +977,21 @@ encode_audio_native :: proc(
 	receiver: media.Receiver,
 ) -> media.Error {
 	s := (^State)(session.state)
+	if s.opus_encoder != nil do return encode_opus(session, s, frame.samples, receiver)
 	if s.audio_sample_index > max(i64) - i64(s.aac_encoder.frame_samples) do return .Invalid_Input
 	packet, err := aace.encode_frame_borrowed(s.aac_encoder, frame.samples)
 	if err != .None do return map_aac_error(session, err)
 	emit_aac_packet(session, s, packet, receiver)
+	return .None
+}
+
+@(private)
+encode_opus :: proc(session: ^media.Session, s: ^State, samples: []f32, receiver: media.Receiver) -> media.Error {
+	if len(samples) != 960 * session.config.channels || s.audio_sample_index > max(i64) - 960 do return .Invalid_Input
+	n, err := opus.encode_packet(s.opus_encoder, samples, s.opus_packet[:])
+	if err != .None {session.error_detail = "Opus encoding failed"; return .Codec_Error}
+	if receiver.packet != nil do receiver.packet({data = s.opus_packet[:n], framing = .Frame, sample_index = s.audio_sample_index, duration_samples = 960, sample_rate = 48000}, receiver.user)
+	s.audio_sample_index += 960
 	return .None
 }
 
@@ -975,6 +1001,11 @@ drain_native :: proc(session: ^media.Session, receiver: media.Receiver) -> media
 	if session.config.operation == .Encode {
 		when OICUT_NATIVE_H265 {
 			if s.hevc_encoder != nil do hevce.flush_encoder(s.hevc_encoder, &s.encoded)
+		}
+		if s.opus_encoder != nil {
+			// One frame of silence: the last input is in the MDCT overlap.
+			silence: [2 * 960]f32
+			return encode_opus(session, s, silence[:960 * session.config.channels], receiver)
 		}
 		if s.aac_encoder != nil {
 			for {

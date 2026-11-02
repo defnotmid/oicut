@@ -80,7 +80,14 @@ video.destroy(&w)
     (or `width == 0 && height == 0` with `sample_rate > 0 && channels > 0`)
     writes an audio-only AAC-LC `.m4a` (`ftyp` major brand `M4A `).
 - **VP9 / WebM:** `codec = .VP9` writes WebM with the native VP9 encoder
-  (`base_q_idx = 5 * qp`, video only: audio is `Unsupported`). With
+  (`base_q_idx = 5 * qp`) and audio as Opus: 48 kHz, mono or stereo, at
+  `audio_bit_rate` (64 kb/s per channel by default), the native CELT-only
+  encoder's VBR at complexity 9 (other rates and channel counts are
+  `Unsupported`, with `error_detail` saying so). The pre-skip and the last
+  packet's padding are trimmed (`CodecDelay`, `DiscardPadding`), so readers
+  get the exact input length; audio is interleaved up to each frame's time.
+  WebM timestamps are whole milliseconds; `DefaultDuration` holds the exact
+  frame duration. With
   `transparency = .Straight` the alpha travels as a second VP9 stream in
   BlockAdditional 1, which Chrome, Firefox and Edge composite. Files are
   within a few percent of libvpx's at equal quality ([BENCHMARKS](../BENCHMARKS.md)).

@@ -19,7 +19,7 @@ Video:
 
 Audio:
 - `audio/aac/{encoder,decoder}`: AAC-LC, 1 to 8 channels ([README](audio/aac/README.md)).
-- `audio/opus`: Opus decoding (SILK, hybrid, CELT), with loss concealment, FEC, DTX and surround ([README](audio/opus/README.md)).
+- `audio/opus`: Opus decoding (SILK, hybrid, CELT), with loss concealment, FEC, DTX and surround, and CELT-only encoding for music, matching libopus's rate and quality ([README](audio/opus/README.md)).
 - `audio/flac`: FLAC decoding, 4 to 32 bits ([README](audio/flac/README.md)).
 - `audio/alac`: Apple Lossless (ALAC) decoding, 16/20/24/32-bit, 1 to 8 channels ([README](audio/alac/README.md)).
 - `audio/mp3`: MPEG-1/2/2.5 Layer III decoding ([README](audio/mp3/README.md)).
@@ -37,7 +37,7 @@ Images:
 
 Containers:
 - `container/mp4`: MP4/M4A/MOV reading (including fragmented `moof`/`traf`) and writing ([README](container/mp4/README.md)).
-- `container/webm`: WebM/Matroska reading, and VP9 WebM writing with alpha ([README](container/webm/README.md)).
+- `container/webm`: WebM/Matroska reading, and VP9 WebM writing with alpha and Opus audio ([README](container/webm/README.md)).
 - `container/ogg`: Ogg (for Ogg Opus and Ogg Vorbis) ([README](container/ogg/README.md)).
 
 Putting them together:
@@ -48,7 +48,7 @@ Putting them together:
 - `media/mediafoundation`: the Windows Media Foundation system provider, H.264 and H.265 decoding and encoding through the transforms Windows ships (H.265 with the HEVC Video Extensions) ([README](media/mediafoundation/README.md)).
 - `media/audiotoolbox`: the macOS AudioToolbox system provider, AAC-LC, HE-AAC and HE-AAC v2 decoding and AAC-LC encoding ([README](media/audiotoolbox/README.md)).
 - `audio`: any file's first audio track (AAC, PCM, FLAC, MP3, Opus, ALAC, Vorbis in MP4, Matroska, WAV, FLAC, MP3 or Ogg) as interleaved `f32` in WAVE channel order, with seeking; `decode` for a file in memory ([README](audio/README.md)).
-- `video`: RGBA or planar frames and `f32` PCM from and to movie files (its audio through `audio`), with frame-accurate seeking; writes MP4/M4A (H.264, H.265, HEVC with alpha, AV1, AAC-LC) and WebM (VP9, with alpha) ([README](video/README.md)).
+- `video`: RGBA or planar frames and `f32` PCM from and to movie files (its audio through `audio`), with frame-accurate seeking; writes MP4/M4A (H.264, H.265, HEVC with alpha, AV1, AAC-LC) and WebM (VP9, with alpha; Opus) ([README](video/README.md)).
 - `viewer`: an SDL3 player for all of the above.
 
 Each layer imports only the ones below it: `common`, then the codecs and

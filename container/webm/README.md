@@ -57,14 +57,22 @@ w: webm.Writer
 err := webm.create(&w, "out.webm", {
     width = width, height = height,
     alpha = true, default_duration = 33_333_333,
+    audio_channels = 2, audio_private = opus_head, audio_delay = 2_500_000, // optional Opus track
 }) // or create_stream with a borrowed Write_At stream
 err = webm.write_sample(&w, colour_packet, pts_ns, keyframe, alpha_packet, duration_ns)
+err = webm.write_audio_sample(&w, opus_packet, pts_ns, duration_ns, discard_ns) // discard_ns: the last packet's padding
 err = webm.finish(&w)
 webm.destroy(&w)
 ```
 
-- Video-only, one VP9 track, BT.709 limited range, 8-bit. Packets are borrowed
-  during `write_sample` and immediately written; no encoder/runtime dependency.
+- One VP9 (or AV1) track, BT.709 limited range, 8-bit, and optionally an
+  Opus track (`A_OPUS`, track 2: mono or stereo at 48 kHz, its OpusHead as
+  CodecPrivate, `CodecDelay` the pre-skip and an 80 ms `SeekPreRoll`). Opus
+  packets are SimpleBlocks; the last may carry a `DiscardPadding` (a
+  BlockGroup; a signed integer) trimming the encoder's padding. Each
+  track's timestamps strictly increase; the tracks interleave. Packets are
+  borrowed during `write_sample` and immediately written; no encoder/runtime
+  dependency.
   Dimensions may be odd. The writer does not parse packets: the caller must
   supply matching colour/alpha frame types and dimensions.
 - Nanosecond API timestamps are floored to millisecond ticks (TimecodeScale
@@ -73,8 +81,11 @@ webm.destroy(&w)
 - Opaque output uses SimpleBlock. Alpha output uses BlockGroup, ReferenceBlock
   for inter frames, and BlockAdditions/BlockMore with BlockAddID 1. AlphaMode
   and MaxBlockAdditionID are 1; every frame must supply an alpha packet.
-- A new Cluster starts at each keyframe and before the signed relative block
-  time would exceed 32767 ticks. Cues index keyframes at Cluster starts.
+- A new Cluster starts at each keyframe (unless audio at the same tick just
+  started one), and where a video block would fall before the open Cluster or
+  more than 32767 ticks after it. Audio joins the open Cluster, before its
+  start too (block times are signed), so Cluster times only increase. Cues
+  index keyframes at Cluster starts.
 - SeekHead precedes Info and Tracks; finish patches its Cues pointer, Duration,
   Segment size and the last Cluster size. Other Cluster sizes patch at rollover.
   A missing final duration uses DefaultDuration, or the preceding PTS delta.
@@ -91,7 +102,7 @@ webm.destroy(&w)
   streams remain open. I/O errors latch: later writes/finish return IO_Error.
   A failed scratch reservation returns Out_Of_Memory before anything is
   written, so the call can be retried. Destroy before reinitializing a writer.
-- No audio, alternate codecs, multiple tracks, lacing, non-seekable output,
+- No other audio codecs, more tracks, lacing, non-seekable output,
   reordering, live streaming or faststart Cues relocation in this phase.
 
 The writer's tests cover reader round-trip, alpha, gaps/cluster rollover,

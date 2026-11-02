@@ -267,3 +267,76 @@ writer_av1_roundtrip :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(r.tracks[0].samples), 2)
 }
 
+
+// Cluster Timecodes in file order, by a scan of the Segment's children.
+@(private = "file")
+cluster_times :: proc(data: []u8) -> (times: [dynamic]u64) {
+	vint :: proc(b: []u8, marker: bool) -> (value: u64, n: int) {
+		for n = 1; n <= 8 && b[0] & (0x80 >> uint(n - 1)) == 0; n += 1 {}
+		value = marker ? u64(b[0]) : u64(b[0]) & (0xFF >> uint(n))
+		for i in 1 ..< n do value = value << 8 | u64(b[i])
+		return
+	}
+	at := 0
+	for at < len(data) {
+		id, idn := vint(data[at:], true)
+		size, sn := vint(data[at + idn:], false)
+		body := at + idn + sn
+		switch id {
+		case 0x18538067:
+			at = body // into the Segment
+		case 0x1F43B675:
+			tid, tn := vint(data[body:], true)
+			tsize, ts := vint(data[body + tn:], false)
+			if tid == 0xE7 {
+				v: u64
+				for i in 0 ..< int(tsize) do v = v << 8 | u64(data[body + tn + ts + i])
+				append(&times, v)
+			}
+			at = body + int(size)
+		case:
+			at = body + int(size)
+		}
+	}
+	return
+}
+
+// Opus beside VP9: audio at a keyframe's tick shares its Cluster, audio
+// written late joins the open Cluster before its start, so Cluster times
+// only increase; DiscardPadding with its top bit set reads back positive;
+// the Duration is the presented end, CodecDelay excluded.
+@(test)
+writer_opus_track :: proc(t: ^testing.T) {
+	m: Writer_Memory
+	defer delete(m.data)
+	w: Writer
+	head := [19]u8{'O', 'p', 'u', 's', 'H', 'e', 'a', 'd', 1, 2, 120, 0, 0x80, 0xBB, 0, 0, 0, 0, 0}
+	config := Writer_Config{width = 64, height = 48, default_duration = 33_333_333, audio_channels = 2, audio_private = head[:], audio_delay = 2_500_000}
+	testing.expect_value(t, create_stream(&w, writer_memory_stream(&m), config), .None)
+	FRAME :: 20_000_000
+	testing.expect_value(t, write_audio_sample(&w, {1}, 0, FRAME), .None)
+	for f in 0 ..< 31 do testing.expect_value(t, write_sample(&w, {2}, i64(f) * 33_333_333, f % 30 == 0), .None)
+	// Late: before the Cluster that the keyframe at 1 s opened.
+	for k in 1 ..< 59 do testing.expect_value(t, write_audio_sample(&w, {3}, i64(k) * FRAME, FRAME), .None)
+	DISCARD :: 13_333_333 // 0xCB7355: the top bit set
+	testing.expect_value(t, write_audio_sample(&w, {4}, 59 * FRAME, FRAME, DISCARD), .None)
+	testing.expect_value(t, finish(&w), .None)
+	destroy(&w)
+	times := cluster_times(m.data[:])
+	defer delete(times)
+	testing.expect_value(t, len(times), 2)
+	for i in 1 ..< len(times) do testing.expectf(t, times[i] > times[i - 1], "cluster times %v", times)
+	r: Reader
+	testing.expect_value(t, open_stream(&r, writer_memory_stream(&m)), .None)
+	defer close(&r)
+	testing.expect_value(t, len(r.tracks), 2)
+	a := &r.tracks[1]
+	testing.expect_value(t, a.codec, Codec.Opus)
+	testing.expect_value(t, a.codec_delay, 2_500_000)
+	testing.expect_value(t, a.end_discard, DISCARD)
+	testing.expect_value(t, len(a.samples), 60)
+	for k in 0 ..< 60 do testing.expect_value(t, a.samples[k].pts, i64(k) * FRAME)
+	// Audio outlasts the video (1.033 s): 60 frames less the discard and the
+	// delay.
+	testing.expectf(t, abs(r.duration - f64(60 * FRAME - DISCARD - 2_500_000) / 1e9) < 1e-6, "duration %v", r.duration)
+}

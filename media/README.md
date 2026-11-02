@@ -22,6 +22,7 @@ platforms, so it can be listed everywhere.
 | ALAC decode | 16/20/24/32-bit, 1–8 channels (MPEG/AAC canonical order); see [`alac`](../audio/alac/README.md) | Unsupported | Unsupported |
 | MP3 decode | MPEG-1/2/2.5 Layer III, mono/stereo (Layers I/II and free format refused) | Unsupported | Unsupported |
 | Opus decode | SILK, hybrid and CELT at 48 kHz, DTX, multistream up to 255 channels (Opus mapping order); see [`opus`](../audio/opus/README.md) | Unsupported | Unsupported |
+| Opus encode | CELT-only, mono/stereo, 48 kHz, 20 ms packets, VBR (6..510 kb/s); a silent frame on drain covers the 120-sample delay | Unsupported | Unsupported |
 | AV1 encode | Profiles 0–2, 8/10/12-bit, 4:2:0/4:2:2/4:4:4/mono, `av1_q_index(qp)` (calibrated to H.264/HEVC QP), periodic keyframes | Unsupported; selects native in Automatic mode | Unsupported |
 | AV1 decode | Profiles 0–2, 8/10/12-bit, 4:2:0/4:2:2/4:4:4/mono, film grain; identical to dav1d | Main 4:2:0, 8/10-bit, host output; see [`av1`](../video/av1/README.md) | Unsupported |
 
