@@ -26,6 +26,8 @@ QTHETA_OFFSET :: 4
 QTHETA_OFFSET_TWOPHASE :: 16
 @(private)
 COMBFILTER_MINPERIOD :: 15
+@(private)
+COMBFILTER_MAXPERIOD :: 1024
 
 Spread :: enum u8 {
 	None,
@@ -41,12 +43,8 @@ Celt :: struct {
 	stream_channels:       int, // coded channels of the current frame
 	start, end:            int, // coded band range
 	rng:                   u32, // final range of the last frame
-	postfilter_period:     int,
-	postfilter_period_old: int,
-	postfilter_gain:       f32,
-	postfilter_gain_old:   f32,
-	postfilter_tapset:     int,
-	postfilter_tapset_old: int,
+	postfilter:            Comb, // at the frame's end
+	postfilter_old:        Comb, // at its start, cross-faded from
 	preemph_mem:           [2]f32,
 	// Band log energies (log2 amplitude) by channel: current, the two before
 	// (anti-collapse), and the background floor.
@@ -80,9 +78,7 @@ celt_init :: proc(c: ^Celt, channels: int) {
 // Forgets the signal history (RFC 6716: on a mode change), keeping setup.
 celt_reset :: proc(c: ^Celt) {
 	c.rng = 0
-	c.postfilter_period, c.postfilter_period_old = 0, 0
-	c.postfilter_gain, c.postfilter_gain_old = 0, 0
-	c.postfilter_tapset, c.postfilter_tapset_old = 0, 0
+	c.postfilter, c.postfilter_old = {}, {}
 	c.preemph_mem = {}
 	c.history = {}
 	c.band_e = {}
@@ -131,15 +127,14 @@ celt_decode :: proc(c: ^Celt, data: []u8, r: ^Range_Decoder, pcm: []f32, frame_s
 		r.nbits_total += total_bits - range_tell(r)
 		tell = total_bits
 	}
-	postfilter_gain: f32
-	postfilter_pitch, postfilter_tapset := 0, 0
+	postfilter: Comb
 	if start == 0 && tell + 16 <= total_bits {
 		if range_bit_logp(r, 1) {
 			octave := int(range_uint(r, 6))
-			postfilter_pitch = (16 << uint(octave)) + int(range_bits(r, uint(4 + octave))) - 1
+			postfilter.period = (16 << uint(octave)) + int(range_bits(r, uint(4 + octave))) - 1
 			qg := int(range_bits(r, 3))
-			if range_tell(r) + 2 <= total_bits do postfilter_tapset = range_icdf(r, TAPSET_ICDF[:], 2)
-			postfilter_gain = 0.09375 * f32(qg + 1)
+			if range_tell(r) + 2 <= total_bits do postfilter.tapset = range_icdf(r, TAPSET_ICDF[:], 2)
+			postfilter.gain = 0.09375 * f32(qg + 1)
 		}
 		tell = range_tell(r)
 	}
@@ -153,15 +148,11 @@ celt_decode :: proc(c: ^Celt, data: []u8, r: ^Range_Decoder, pcm: []f32, frame_s
 	coarse_energy(c, r, start, end, intra, ch, lm)
 
 	tf_res: [NB_BANDS]int
-	tf_decode(r, start, end, transient, &tf_res, lm)
+	tf_code(r, start, end, transient, &tf_res, lm)
 	spread := Spread.Normal
 	if range_tell(r) + 4 <= total_bits do spread = Spread(range_icdf(r, SPREAD_ICDF[:], 5))
 
-	caps: [NB_BANDS]int
-	for i in 0 ..< NB_BANDS {
-		width := int(EBANDS[i + 1] - EBANDS[i]) << uint(lm)
-		caps[i] = (int(CACHE_CAPS[2 * lm + ch - 1][i]) + 64) * ch * width >> 2
-	}
+	caps := band_caps(lm, ch)
 	// Dynamic allocation boosts per band.
 	offsets: [NB_BANDS]int
 	dynalloc_logp: uint = 6
@@ -194,7 +185,18 @@ celt_decode :: proc(c: ^Celt, data: []u8, r: ^Range_Decoder, pcm: []f32, frame_s
 
 	for k in 0 ..< cc do copy(c.history[k][:DECODE_BUFFER - n + OVERLAP], c.history[k][n:])
 
-	bands_decode(c, r, start, end, &a, transient ? m : 0, spread, &tf_res, (len(data) * 8) << BITRES - anti_collapse_rsv, lm, ch)
+	planes := Band_Planes {
+		x               = c.x[0][:],
+		y               = ch == 2 ? c.x[1][:] : nil,
+		norm            = c.norm[0][:],
+		norm2           = c.norm[1][:],
+		// The last band's room in x is free until it is decoded.
+		lowband_scratch = c.x[0][m * int(EBANDS[NB_BANDS - 1]):],
+		collapse        = c.collapse[:],
+		seed            = &c.rng,
+		disable_inv     = c.channels == 1,
+	}
+	quant_all_bands(r, planes, start, end, &a, transient ? m : 0, spread, &tf_res, (len(data) * 8) << BITRES - anti_collapse_rsv, lm, ch)
 
 	anti_collapse_on := anti_collapse_rsv > 0 && range_bits(r, 1) == 1
 	finalise_energy(c, r, start, end, &a.fine_quant, &a.fine_priority, len(data) * 8 - range_tell(r), ch)
@@ -205,14 +207,16 @@ celt_decode :: proc(c: ^Celt, data: []u8, r: ^Range_Decoder, pcm: []f32, frame_s
 	synthesis(c, start, min(end, NB_BANDS), ch, cc, transient, lm, silence)
 
 	for k in 0 ..< cc {
-		c.postfilter_period = max(c.postfilter_period, COMBFILTER_MINPERIOD)
-		c.postfilter_period_old = max(c.postfilter_period_old, COMBFILTER_MINPERIOD)
-		comb_filter(c.history[k][:], DECODE_BUFFER - n, c.postfilter_period_old, c.postfilter_period, SHORT_MDCT, c.postfilter_gain_old, c.postfilter_gain, c.postfilter_tapset_old, c.postfilter_tapset)
-		if lm != 0 do comb_filter(c.history[k][:], DECODE_BUFFER - n + SHORT_MDCT, c.postfilter_period, postfilter_pitch, n - SHORT_MDCT, c.postfilter_gain, postfilter_gain, c.postfilter_tapset, postfilter_tapset)
+		h := c.history[k][:]
+		at := DECODE_BUFFER - n
+		c.postfilter.period = max(c.postfilter.period, COMBFILTER_MINPERIOD)
+		c.postfilter_old.period = max(c.postfilter_old.period, COMBFILTER_MINPERIOD)
+		comb_filter(h, at, h, at, SHORT_MDCT, c.postfilter_old, c.postfilter, true)
+		if lm != 0 do comb_filter(h, at + SHORT_MDCT, h, at + SHORT_MDCT, n - SHORT_MDCT, c.postfilter, postfilter, true)
 	}
-	c.postfilter_period_old, c.postfilter_gain_old, c.postfilter_tapset_old = c.postfilter_period, c.postfilter_gain, c.postfilter_tapset
-	c.postfilter_period, c.postfilter_gain, c.postfilter_tapset = postfilter_pitch, postfilter_gain, postfilter_tapset
-	if lm != 0 do c.postfilter_period_old, c.postfilter_gain_old, c.postfilter_tapset_old = c.postfilter_period, c.postfilter_gain, c.postfilter_tapset
+	c.postfilter_old = c.postfilter
+	c.postfilter = postfilter
+	if lm != 0 do c.postfilter_old = c.postfilter
 
 	if ch == 1 do c.band_e[1] = c.band_e[0]
 	if !transient {
@@ -243,19 +247,34 @@ celt_decode :: proc(c: ^Celt, data: []u8, r: ^Range_Decoder, pcm: []f32, frame_s
 	return .None
 }
 
+// The coarse energy predictor: in time by ENERGY_PRED, in frequency with
+// ENERGY_BETA of each residual subtracted from the running sum.
+@(private, rodata)
+ENERGY_PRED := [4]f32{29440.0 / 32768, 26112.0 / 32768, 21248.0 / 32768, 16384.0 / 32768}
+@(private, rodata)
+ENERGY_BETA := [4]f32{30147.0 / 32768, 22282.0 / 32768, 12124.0 / 32768, 6554.0 / 32768}
+@(private)
+ENERGY_BETA_INTRA :: f32(4915.0 / 32768)
+@(private, rodata)
+SMALL_ENERGY_ICDF := [3]u8{2, 1, 0}
+
+// The shape bits a band can take at most.
+@(private)
+band_caps :: proc(lm, ch: int) -> (caps: [NB_BANDS]int) {
+	for i in 0 ..< NB_BANDS {
+		width := int(EBANDS[i + 1] - EBANDS[i]) << uint(lm)
+		caps[i] = (int(CACHE_CAPS[2 * lm + ch - 1][i]) + 64) * ch * width >> 2
+	}
+	return
+}
+
 // Coarse energy (RFC 6716 4.3.2.1): Laplace residuals of a prediction in
 // time (inter) and frequency.
 @(private)
 coarse_energy :: proc(c: ^Celt, r: ^Range_Decoder, start, end: int, intra: bool, ch, lm: int) {
-	@(static, rodata)
-	PRED := [4]f32{29440.0 / 32768, 26112.0 / 32768, 21248.0 / 32768, 16384.0 / 32768}
-	@(static, rodata)
-	BETA := [4]f32{30147.0 / 32768, 22282.0 / 32768, 12124.0 / 32768, 6554.0 / 32768}
-	@(static, rodata)
-	SMALL_ENERGY_ICDF := [3]u8{2, 1, 0}
 	model := &E_PROB_MODEL[lm][intra ? 1 : 0]
-	coef := intra ? 0 : PRED[lm]
-	beta := intra ? f32(4915.0 / 32768) : BETA[lm]
+	coef := intra ? 0 : ENERGY_PRED[lm]
+	beta := intra ? ENERGY_BETA_INTRA : ENERGY_BETA[lm]
 	prev: [2]f32
 	budget := len(r.data) * 8
 	for i in start ..< end {
@@ -309,9 +328,10 @@ finalise_energy :: proc(c: ^Celt, r: ^Range_Decoder, start, end: int, fine_quant
 	}
 }
 
-// Per-band changes of time/frequency resolution (RFC 6716 4.3.4.5).
+// Per-band changes of time/frequency resolution (RFC 6716 4.3.4.5). Encoding,
+// tf_res comes in as the 0/1 choices and tf_select as the table row.
 @(private)
-tf_decode :: proc(r: ^Range_Decoder, start, end: int, transient: bool, tf_res: ^[NB_BANDS]int, lm: int) {
+tf_code :: proc(r: ^$R, start, end: int, transient: bool, tf_res: ^[NB_BANDS]int, lm: int, tf_select_in := 0) {
 	budget := len(r.data) * 8
 	tell := range_tell(r)
 	logp: uint = transient ? 2 : 4
@@ -320,7 +340,12 @@ tf_decode :: proc(r: ^Range_Decoder, start, end: int, transient: bool, tf_res: ^
 	changed, curr := 0, 0
 	for i in start ..< end {
 		if tell + int(logp) <= budget {
-			curr ~= int(range_bit_logp(r, logp))
+			when R == Range_Encoder {
+				range_encode_bit_logp(r, tf_res[i] != curr, logp)
+				curr = tf_res[i]
+			} else {
+				curr ~= int(range_bit_logp(r, logp))
+			}
 			tell = range_tell(r)
 			changed |= curr
 		}
@@ -329,7 +354,14 @@ tf_decode :: proc(r: ^Range_Decoder, start, end: int, transient: bool, tf_res: ^
 	}
 	t := transient ? 4 : 0
 	tf_select := 0
-	if select_rsv != 0 && TF_SELECT[lm][t + changed] != TF_SELECT[lm][t + 2 + changed] do tf_select = int(range_bit_logp(r, 1))
+	if select_rsv != 0 && TF_SELECT[lm][t + changed] != TF_SELECT[lm][t + 2 + changed] {
+		when R == Range_Encoder {
+			tf_select = tf_select_in
+			range_encode_bit_logp(r, tf_select != 0, 1)
+		} else {
+			tf_select = int(range_bit_logp(r, 1))
+		}
+	}
 	for i in start ..< end do tf_res[i] = int(TF_SELECT[lm][t + 2 * tf_select + tf_res[i]])
 }
 
@@ -376,33 +408,56 @@ synthesis :: proc(c: ^Celt, start, end, ch, cc: int, transient: bool, lm: int, s
 @(private, rodata)
 COMB_GAINS := [3][3]f32{{0.3066406250, 0.2170410156, 0.1296386719}, {0.4638671875, 0.2680664062, 0}, {0.7998046875, 0.1000976562, 0}}
 
-// The pitch postfilter (RFC 6716 4.3.7.1): a 5-tap comb at period t on
-// x[at ..< at + n] in place, cross-faded over the overlap from the previous
-// filter (t0, g0, tapset0) to the new one.
+// A pitch comb filter: its period in samples, gain and tap shape.
 @(private)
-comb_filter :: proc(x: []f32, at, period0, period1, n: int, g0, g1: f32, tapset0, tapset1: int) {
+Comb :: struct {
+	period: int,
+	gain:   f32,
+	tapset: int,
+}
+
+// The pitch filter (RFC 6716 4.3.7.1): a 5-tap comb y = x + g * x delayed,
+// over n samples from x[x_at] into y[y_at], cross-faded over the overlap
+// from the previous filter to the new one. IN_PLACE (the decoder's
+// postfilter, y and x the same) the delayed taps read its own output, and
+// the write and the reads index alike, which the compiler vectorises; the
+// encoder's prefilter is the same filter with negated gains, out of place.
+@(private)
+comb_filter :: proc(y: []f32, y_at: int, x: []f32, x_at: int, n: int, from, to: Comb, $IN_PLACE: bool) {
 	GAINS := &COMB_GAINS
-	if g0 == 0 && g1 == 0 do return
-	t0, t1 := max(period0, COMBFILTER_MINPERIOD), max(period1, COMBFILTER_MINPERIOD)
-	g00, g01, g02 := g0 * GAINS[tapset0][0], g0 * GAINS[tapset0][1], g0 * GAINS[tapset0][2]
-	g10, g11, g12 := g1 * GAINS[tapset1][0], g1 * GAINS[tapset1][1], g1 * GAINS[tapset1][2]
+	when IN_PLACE {
+		out, d := x, 0
+	} else {
+		out, d := y, y_at - x_at
+	}
+	if from.gain == 0 && to.gain == 0 {
+		when !IN_PLACE do copy(y[y_at:][:n], x[x_at:][:n])
+		return
+	}
+	t0, t1 := max(from.period, COMBFILTER_MINPERIOD), max(to.period, COMBFILTER_MINPERIOD)
+	g00, g01, g02 := from.gain * GAINS[from.tapset][0], from.gain * GAINS[from.tapset][1], from.gain * GAINS[from.tapset][2]
+	g10, g11, g12 := to.gain * GAINS[to.tapset][0], to.gain * GAINS[to.tapset][1], to.gain * GAINS[to.tapset][2]
 	overlap := OVERLAP
-	if g0 == g1 && t0 == t1 && tapset0 == tapset1 do overlap = 0
-	// The filter reads x before `at` (the history), and its own output: the
-	// taps lag by at least COMBFILTER_MINPERIOD > 2.
+	if from.gain == to.gain && t0 == t1 && from.tapset == to.tapset do overlap = 0
+	// The filter reads x before x_at (the history): the taps lag by at
+	// least COMBFILTER_MINPERIOD > 2.
+	at := x_at
 	x1, x2, x3, x4 := x[at - t1 + 1], x[at - t1], x[at - t1 - 1], x[at - t1 - 2]
 	i := 0
 	#no_bounds_check for ; i < overlap; i += 1 {
 		p := at + i
 		x0 := x[p - t1 + 2]
 		f := WINDOW[i] * WINDOW[i]
-		x[p] = x[p] + (1 - f) * g00 * x[p - t0] + (1 - f) * g01 * (x[p - t0 + 1] + x[p - t0 - 1]) + (1 - f) * g02 * (x[p - t0 + 2] + x[p - t0 - 2]) + f * g10 * x2 + f * g11 * (x1 + x3) + f * g12 * (x0 + x4)
+		out[p + d] = x[p] + (1 - f) * g00 * x[p - t0] + (1 - f) * g01 * (x[p - t0 + 1] + x[p - t0 - 1]) + (1 - f) * g02 * (x[p - t0 + 2] + x[p - t0 - 2]) + f * g10 * x2 + f * g11 * (x1 + x3) + f * g12 * (x0 + x4)
 		x4, x3, x2, x1 = x3, x2, x1, x0
 	}
-	if g1 == 0 do return
+	if to.gain == 0 {
+		when !IN_PLACE do copy(y[y_at + i:][:n - i], x[at + i:][:n - i])
+		return
+	}
 	#no_bounds_check for ; i < n; i += 1 {
 		p := at + i
-		x[p] = x[p] + g10 * x[p - t1] + g11 * (x[p - t1 + 1] + x[p - t1 - 1]) + g12 * (x[p - t1 + 2] + x[p - t1 - 2])
+		out[p + d] = x[p] + g10 * x[p - t1] + g11 * (x[p - t1 + 1] + x[p - t1 - 1]) + g12 * (x[p - t1 + 2] + x[p - t1 - 2])
 	}
 }
 

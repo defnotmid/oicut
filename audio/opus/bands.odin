@@ -1,16 +1,22 @@
 package opus
 
+import "base:runtime"
 import "core:math"
+import "core:simd"
 
 // Band shapes (RFC 6716 4.3.4): each band's unit-norm vector, as PVQ pulses
 // (split recursively while too many bits for one codeword), or folded from
 // lower bands when it gets none. Mid/side or dual stereo, with the time and
 // frequency resolution of each band changed by Haar transforms.
+//
+// One path codes and decodes: R is Range_Decoder or Range_Encoder. The
+// encoder chooses what the decoder reads, and reconstructs what the decoder
+// will (the folding sources and collapse masks later bands depend on).
 
-// What decoding one frame's bands shares.
+// What coding one frame's bands shares.
 @(private)
-Band_Ctx :: struct {
-	r:              ^Range_Decoder,
+Band_Ctx :: struct($R: typeid) {
+	r:              ^R,
 	i:              int, // band
 	intensity:      int,
 	spread:         Spread,
@@ -21,6 +27,10 @@ Band_Ctx :: struct {
 	// One output channel: the inversion of intensity stereo is decoded but
 	// not applied, so a downmix does not cancel (RFC 8251).
 	disable_inv:    bool,
+	// Encoding: band amplitudes by channel, and the split angle's rounding
+	// (0 nearest, -1 down, +1 up) for the stereo rate-distortion choice.
+	band_e:         ^[2][NB_BANDS]f32,
+	theta_round:    int,
 }
 
 @(private)
@@ -31,6 +41,9 @@ Split :: struct {
 	itheta:       int,
 	qalloc:       int,
 }
+
+@(private)
+MIN_STEREO_ENERGY :: 1e-10
 
 @(private)
 lcg_rand :: #force_inline proc "contextless" (seed: u32) -> u32 {
@@ -179,6 +192,21 @@ cwrsi :: proc(n_, k_: int, index: u32, y: []int) -> int {
 	return yy
 }
 
+// The index of codeword y (n >= 2), cwrsi's inverse.
+@(private)
+icwrs :: proc(n: int, y: []int) -> u32 {
+	j := n - 1
+	i: u32 = y[j] < 0 ? 1 : 0
+	k := abs(y[j])
+	for j > 0 {
+		j -= 1
+		i += pvq_u(n - j, k)
+		k += abs(y[j])
+		if y[j] < 0 do i += pvq_u(n - j, k + 1)
+	}
+	return i
+}
+
 // Spreading (RFC 6716 4.3.4.3): rotations in the plane of neighbours (and
 // of samples stride2 apart) that smear a few pulses over the band.
 @(private)
@@ -198,8 +226,10 @@ exp_rotation1 :: proc(x: []f32, length, stride: int, c, s: f32) {
 	}
 }
 
+// The spreading rotation over x; the encoder applies it forward before
+// the search, both sides inverse after.
 @(private)
-exp_rotation_inverse :: proc(x: []f32, length, stride, k: int, spread: Spread) {
+exp_rotation :: proc(x: []f32, length, stride, k: int, spread: Spread, $FORWARD: bool) {
 	@(static, rodata)
 	FACTOR := [3]int{15, 10, 5}
 	if 2 * k >= length || spread == .None do return
@@ -215,21 +245,23 @@ exp_rotation_inverse :: proc(x: []f32, length, stride, k: int, spread: Spread) {
 	n := length / stride
 	for i in 0 ..< stride {
 		v := x[i * n:][:n]
-		if stride2 != 0 do exp_rotation1(v, n, stride2, s, c)
-		exp_rotation1(v, n, 1, c, s)
+		when FORWARD {
+			exp_rotation1(v, n, 1, c, -s)
+			if stride2 != 0 do exp_rotation1(v, n, stride2, s, -c)
+		} else {
+			if stride2 != 0 do exp_rotation1(v, n, stride2, s, c)
+			exp_rotation1(v, n, 1, c, s)
+		}
 	}
 }
 
-// Decodes k pulses over x (n > 1), scaled to `gain` and spread; returns
-// which of the b short blocks got pulses.
+// Codeword iy (sum of squares yy) as x, scaled to `gain` and spread;
+// returns which of the b short blocks got pulses.
 @(private)
-alg_unquant :: proc(x: []f32, n, k: int, spread: Spread, b: int, r: ^Range_Decoder, gain: f32) -> u32 {
-	iy: [176]int
-	v := pvq_u(n, k) + pvq_u(n, k + 1)
-	ryy := cwrsi(n, k, range_uint(r, v), iy[:n])
-	g := gain / f32(math.sqrt(f64(ryy)))
+pvq_synthesis :: #force_inline proc(x: []f32, iy: []int, n, k: int, spread: Spread, b: int, yy: int, gain: f32) -> u32 {
+	g := gain / f32(math.sqrt(f64(yy)))
 	for i in 0 ..< n do x[i] = f32(iy[i]) * g
-	exp_rotation_inverse(x, n, b, k, spread)
+	exp_rotation(x, n, b, k, spread, false)
 	if b <= 1 do return 1
 	n0 := n / b
 	mask: u32
@@ -239,6 +271,105 @@ alg_unquant :: proc(x: []f32, n, k: int, spread: Spread, b: int, r: ^Range_Decod
 		if any != 0 do mask |= 1 << uint(blk)
 	}
 	return mask
+}
+
+// Decodes k pulses over x (n > 1).
+@(private)
+alg_unquant :: proc(x: []f32, n, k: int, spread: Spread, b: int, r: ^Range_Decoder, gain: f32) -> u32 {
+	iy: [176]int
+	v := pvq_u(n, k) + pvq_u(n, k + 1)
+	ryy := cwrsi(n, k, range_uint(r, v), iy[:n])
+	return pvq_synthesis(x, iy[:], n, k, spread, b, ryy, gain)
+}
+
+// Encodes x (n > 1) as the k-pulse codeword nearest its direction, and
+// replaces it with what the decoder will reconstruct.
+@(private)
+alg_quant :: proc(x: []f32, n, k: int, spread: Spread, b: int, r: ^Range_Encoder, gain: f32) -> u32 {
+	iy: [176]int
+	exp_rotation(x, n, b, k, spread, true)
+	pvq_search(x[:n], iy[:n], k)
+	range_encode_uint(r, icwrs(n, iy[:n]), pvq_u(n, k) + pvq_u(n, k + 1))
+	yy := 0
+	for v in iy[:n] do yy += v * v
+	return pvq_synthesis(x, iy[:], n, k, spread, b, yy, gain)
+}
+
+@(private)
+PVQ_LANES :: max(8, runtime.NATIVE_SIMD_BIT_WIDTH / 32)
+
+// The k pulses maximising the correlation with x over the pulses' norm
+// (x is left as its magnitudes): a projection onto the pyramid, then one
+// pulse at a time.
+@(private)
+pvq_search :: proc(x: []f32, iy: []int, k: int) {
+	n := len(x)
+	// Magnitudes and twice the pulses, padded to whole lanes with
+	// positions no pulse goes to.
+	mag, y: [176 + PVQ_LANES]f32
+	negative: [176]bool
+	for j in 0 ..< n {
+		negative[j] = x[j] < 0
+		x[j] = abs(x[j])
+		iy[j] = 0
+	}
+	xy, yy: f32
+	left := k
+	if k > n >> 1 {
+		sum: f32
+		for v in x do sum += v
+		// Too small, or not finite: one pulse's direction.
+		if !(sum > 1e-15 && sum < 64) {
+			x[0] = 1
+			for &v in x[1:] do v = 0
+			sum = 1
+		}
+		// k + 0.8 so that rounding down never gives more than k.
+		rcp := (f32(k) + 0.8) * (1 / sum)
+		for j in 0 ..< n {
+			iy[j] = int(rcp * x[j]) // not negative: truncation is the floor
+			y[j] = f32(iy[j])
+			yy += y[j] * y[j]
+			xy += x[j] * y[j]
+			y[j] *= 2
+			left -= iy[j]
+		}
+	}
+	if left > n + 3 {
+		t := f32(left)
+		yy += t * t
+		yy += t * y[0]
+		iy[0] += left
+		left = 0
+	}
+	V :: #simd[PVQ_LANES]f32
+	I :: #simd[PVQ_LANES]i32
+	lanes := (n + PVQ_LANES - 1) / PVQ_LANES * PVQ_LANES
+	copy(mag[:n], x)
+	for j in n ..< lanes do mag[j], y[j] = -1, 1
+	#no_bounds_check for _ in 0 ..< left {
+		yy += 1
+		// The correlation over the norm with the pulse at each position (y
+		// holds twice the pulses, so yy + y[j] is the new squared norm):
+		// each lane keeps its best and the earliest index of it.
+		best_score := V(-1)
+		best_index: I
+		index := simd.indices(I)
+		for j := 0; j < lanes; j += PVQ_LANES {
+			score := (V(xy) + simd.from_slice(V, mag[j:])) / simd.sqrt(V(yy) + simd.from_slice(V, y[j:]))
+			better := simd.lanes_gt(score, best_score)
+			best_score = simd.select(better, score, best_score)
+			best_index = simd.select(better, index, best_index)
+			index += I(PVQ_LANES)
+		}
+		top := simd.lanes_eq(best_score, V(simd.reduce_max(best_score)))
+		best := int(simd.reduce_min(simd.select(top, best_index, I(max(i32)))))
+		xy += mag[best]
+		yy += y[best]
+		y[best] += 2
+		iy[best] += 1
+	}
+	for j in 0 ..< n do if negative[j] do iy[j] = -iy[j]
 }
 
 @(private)
@@ -302,54 +433,165 @@ compute_qn :: proc(n, b, offset, pulse_cap: int, stereo: bool) -> int {
 	return (qn + 1) >> 1 << 1
 }
 
+// atan(y/x) / (pi/2) for x, y >= 0, as libopus approximates it.
+@(private)
+atan2p_norm :: proc "contextless" (y, x: f32) -> f32 {
+	atan_norm :: #force_inline proc "contextless" (x: f32) -> f32 {
+		x2 := x * x
+		return 0.636619772367581 * (x + x * x2 * (-3.3331659436225891113281250000e-01 + x2 * (1.99627041816711425781250000000e-01 + x2 * (-1.3976582884788513183593750000e-01 + x2 * (9.79423448443412780761718750000e-02 + x2 * (-5.7773590087890625000000000000e-02 + x2 * (2.30401363223791122436523437500e-02 + x2 * -4.3554059229791164398193359375e-03)))))))
+	}
+	if x * x + y * y < 1e-18 do return 0
+	return y < x ? atan_norm(y / x) : 1 - atan_norm(x / y)
+}
+
+// The angle between mid and side (stereo) or the two halves, in Q14.
+@(private)
+stereo_itheta :: proc(x, y: []f32, stereo: bool, n: int) -> int {
+	e_mid, e_side: f32
+	if stereo {
+		for i in 0 ..< n {
+			m, s := x[i] + y[i], x[i] - y[i]
+			e_mid += m * m
+			e_side += s * s
+		}
+	} else {
+		for i in 0 ..< n {
+			e_mid += x[i] * x[i]
+			e_side += y[i] * y[i]
+		}
+	}
+	mid := f32(math.sqrt(f64(e_mid)))
+	side := f32(math.sqrt(f64(e_side)))
+	return int(math.floor(0.5 + 65536 * 16384 * f64(atan2p_norm(side, mid)))) >> 16
+}
+
+// Intensity stereo: both channels into x, weighted by their amplitudes.
+@(private)
+intensity_stereo :: proc(x, y: []f32, band_e: ^[2][NB_BANDS]f32, i, n: int) {
+	EPSILON :: 1e-15
+	left, right := band_e[0][i], band_e[1][i]
+	norm := EPSILON + f32(math.sqrt(f64(EPSILON + left * left + right * right)))
+	a1, a2 := left / norm, right / norm
+	for j in 0 ..< n do x[j] = a1 * x[j] + a2 * y[j]
+}
+
+@(private)
+stereo_split :: proc(x, y: []f32, n: int) {
+	for j in 0 ..< n {
+		l, r := 0.70710678 * x[j], 0.70710678 * y[j]
+		x[j], y[j] = l + r, r - l
+	}
+}
+
 // The split angle theta between halves (or mid/side), and the bits it took.
 @(private)
-compute_theta :: proc(ctx: ^Band_Ctx, sc: ^Split, n: int, b: ^int, blocks, b0, lm: int, stereo: bool, fill: ^u32) {
+compute_theta :: proc(ctx: ^Band_Ctx($R), sc: ^Split, x, y: []f32, n: int, b: ^int, blocks, b0, lm: int, stereo: bool, fill: ^u32) {
 	r := ctx.r
 	i := ctx.i
 	pulse_cap := int(LOG_N[i]) + lm * (1 << BITRES)
 	offset := (pulse_cap >> 1) - (stereo && n == 2 ? QTHETA_OFFSET_TWOPHASE : QTHETA_OFFSET)
 	qn := compute_qn(n, b^, offset, pulse_cap, stereo)
 	if stereo && i >= ctx.intensity do qn = 1
-	tell := range_tell_frac(r)
 	itheta := 0
+	when R == Range_Encoder {
+		// atan of side over mid: with both unit norm and orthogonal, it
+		// rescales them both.
+		itheta = stereo_itheta(x, y, stereo, n)
+	}
+	tell := range_tell_frac(r)
 	inv := false
 	if qn != 1 {
+		when R == Range_Encoder {
+			if !stereo || ctx.theta_round == 0 {
+				itheta = (itheta * qn + 8192) >> 14
+				if !stereo && ctx.avoid_split_noise && itheta > 0 && itheta < qn {
+					// Where the allocation would leave one side noise, make it zero.
+					unquantized := itheta * 16384 / qn
+					imid := bitexact_cos(unquantized)
+					iside := bitexact_cos(16384 - unquantized)
+					delta := frac_mul16((n - 1) << 7, bitexact_log2tan(iside, imid))
+					if delta > b^ {
+						itheta = qn
+					} else if delta < -b^ {
+						itheta = 0
+					}
+				}
+			} else {
+				// Rounded down or up, biased toward 0 and 16384.
+				bias := itheta > 8192 ? 32767 / qn : -32767 / qn
+				down := min(qn - 1, max(0, (itheta * qn + bias) >> 14))
+				itheta = ctx.theta_round < 0 ? down : down + 1
+			}
+		}
 		if stereo && n > 2 {
 			// A step pdf: probability 3 up to the middle, 1 after.
 			p0 := 3
 			x0 := qn / 2
 			ft := u32(p0 * (x0 + 1) + x0)
-			fs := int(range_decode(r, ft))
-			x := fs < (x0 + 1) * p0 ? fs / p0 : x0 + 1 + (fs - (x0 + 1) * p0)
-			fl := x <= x0 ? p0 * x : (x - 1 - x0) + (x0 + 1) * p0
-			fh := x <= x0 ? p0 * (x + 1) : (x - x0) + (x0 + 1) * p0
-			range_update(r, u32(fl), u32(fh), ft)
-			itheta = x
+			v: int
+			when R == Range_Encoder {
+				v = itheta
+			} else {
+				fs := int(range_decode(r, ft))
+				v = fs < (x0 + 1) * p0 ? fs / p0 : x0 + 1 + (fs - (x0 + 1) * p0)
+			}
+			fl := v <= x0 ? p0 * v : (v - 1 - x0) + (x0 + 1) * p0
+			fh := v <= x0 ? p0 * (v + 1) : (v - x0) + (x0 + 1) * p0
+			when R == Range_Encoder do range_encode(r, u32(fl), u32(fh), ft)
+			else do range_update(r, u32(fl), u32(fh), ft)
+			itheta = v
 		} else if b0 > 1 || stereo {
-			itheta = int(range_uint(r, u32(qn + 1)))
+			when R == Range_Encoder do range_encode_uint(r, u32(itheta), u32(qn + 1))
+			else do itheta = int(range_uint(r, u32(qn + 1)))
 		} else {
 			// Triangular pdf.
 			half := qn >> 1
 			ft := u32((half + 1) * (half + 1))
-			fm := range_decode(r, ft)
 			fs, fl: int
-			if int(fm) < (half * (half + 1) >> 1) {
-				itheta = int((isqrt32(8 * fm + 1) - 1) >> 1)
-				fs = itheta + 1
-				fl = itheta * (itheta + 1) >> 1
+			when R == Range_Encoder {
+				fs = itheta <= half ? itheta + 1 : qn + 1 - itheta
+				fl = itheta <= half ? itheta * (itheta + 1) >> 1 : int(ft) - ((qn + 1 - itheta) * (qn + 2 - itheta) >> 1)
+				range_encode(r, u32(fl), u32(fl + fs), ft)
 			} else {
-				itheta = int((2 * u32(qn + 1) - isqrt32(8 * (ft - fm - 1) + 1)) >> 1)
-				fs = qn + 1 - itheta
-				fl = int(ft) - ((qn + 1 - itheta) * (qn + 2 - itheta) >> 1)
+				fm := range_decode(r, ft)
+				if int(fm) < (half * (half + 1) >> 1) {
+					itheta = int((isqrt32(8 * fm + 1) - 1) >> 1)
+					fs = itheta + 1
+					fl = itheta * (itheta + 1) >> 1
+				} else {
+					itheta = int((2 * u32(qn + 1) - isqrt32(8 * (ft - fm - 1) + 1)) >> 1)
+					fs = qn + 1 - itheta
+					fl = int(ft) - ((qn + 1 - itheta) * (qn + 2 - itheta) >> 1)
+				}
+				range_update(r, u32(fl), u32(fl + fs), ft)
 			}
-			range_update(r, u32(fl), u32(fl + fs), ft)
 		}
 		itheta = itheta * 16384 / qn
+		when R == Range_Encoder {
+			if stereo {
+				if itheta == 0 {
+					intensity_stereo(x, y, ctx.band_e, i, n)
+				} else {
+					stereo_split(x, y, n)
+				}
+			}
+		}
 	} else if stereo {
-		if b^ > 2 << BITRES && ctx.remaining_bits > 2 << BITRES do inv = range_bit_logp(r, 2)
+		when R == Range_Encoder {
+			inv = itheta > 8192 && !ctx.disable_inv
+			if inv do for &v in y[:n] do v = -v
+			intensity_stereo(x, y, ctx.band_e, i, n)
+		}
+		if b^ > 2 << BITRES && ctx.remaining_bits > 2 << BITRES {
+			when R == Range_Encoder do range_encode_bit_logp(r, inv, 2)
+			else do inv = range_bit_logp(r, 2)
+		} else {
+			inv = false
+		}
 		if ctx.disable_inv do inv = false
 		itheta = 0
+	} else {
+		itheta = 0 // a mono split with no resolution sends nothing
 	}
 	sc.qalloc = range_tell_frac(r) - tell
 	b^ -= sc.qalloc
@@ -373,12 +615,17 @@ compute_theta :: proc(ctx: ^Band_Ctx, sc: ^Split, n: int, b: ^int, blocks, b0, l
 }
 
 @(private)
-quant_band_n1 :: proc(ctx: ^Band_Ctx, x, y: []f32, lowband_out: []f32) -> u32 {
+quant_band_n1 :: proc(ctx: ^Band_Ctx($R), x, y: []f32, lowband_out: []f32) -> u32 {
 	for v in ([2][]f32{x, y}) {
 		if v == nil do continue
 		sign: u32
 		if ctx.remaining_bits >= 1 << BITRES {
-			sign = range_bits(ctx.r, 1)
+			when R == Range_Encoder {
+				sign = v[0] < 0 ? 1 : 0
+				range_encode_bits(ctx.r, sign, 1)
+			} else {
+				sign = range_bits(ctx.r, 1)
+			}
 			ctx.remaining_bits -= 1 << BITRES
 		}
 		v[0] = sign != 0 ? -1 : 1
@@ -390,7 +637,7 @@ quant_band_n1 :: proc(ctx: ^Band_Ctx, x, y: []f32, lowband_out: []f32) -> u32 {
 // A mono partition: split in two while it has too many bits for one
 // codeword, else PVQ, else folding or noise.
 @(private)
-quant_partition :: proc(ctx: ^Band_Ctx, x: []f32, n_, b_, blocks_: int, lowband: []f32, lm_: int, gain: f32, fill_: u32) -> u32 {
+quant_partition :: proc(ctx: ^Band_Ctx($R), x: []f32, n_, b_, blocks_: int, lowband: []f32, lm_: int, gain: f32, fill_: u32) -> u32 {
 	n, b, blocks, lm, fill := n_, b_, blocks_, lm_, fill_
 	i := ctx.i
 	b0 := blocks
@@ -402,7 +649,7 @@ quant_partition :: proc(ctx: ^Band_Ctx, x: []f32, n_, b_, blocks_: int, lowband:
 		if blocks == 1 do fill = (fill & 1) | (fill << 1)
 		blocks = (blocks + 1) >> 1
 		sc: Split
-		compute_theta(ctx, &sc, n, &b, blocks, b0, lm, false, &fill)
+		compute_theta(ctx, &sc, x, y, n, &b, blocks, b0, lm, false, &fill)
 		mid := (1.0 / 32768) * f32(sc.imid)
 		side := (1.0 / 32768) * f32(sc.iside)
 		delta := sc.delta
@@ -445,7 +692,10 @@ quant_partition :: proc(ctx: ^Band_Ctx, x: []f32, n_, b_, blocks_: int, lowband:
 		curr_bits = pulses_to_bits(i, lm, q)
 		ctx.remaining_bits -= curr_bits
 	}
-	if q != 0 do return alg_unquant(x, n, get_pulses(q), ctx.spread, blocks, ctx.r, gain)
+	if q != 0 {
+		when R == Range_Encoder do return alg_quant(x, n, get_pulses(q), ctx.spread, blocks, ctx.r, gain)
+		else do return alg_unquant(x, n, get_pulses(q), ctx.spread, blocks, ctx.r, gain)
+	}
 	// No pulses: fill the band anyway.
 	mask := u32(1 << uint(blocks)) - 1
 	fill &= mask
@@ -476,7 +726,7 @@ quant_partition :: proc(ctx: ^Band_Ctx, x: []f32, n_, b_, blocks_: int, lowband:
 
 // A mono band (or one channel of dual stereo), with its resolution changes.
 @(private)
-quant_band :: proc(ctx: ^Band_Ctx, x: []f32, n, b, blocks_: int, lowband_in: []f32, lm: int, lowband_out: []f32, gain: f32, lowband_scratch: []f32, fill_: u32) -> u32 {
+quant_band :: proc(ctx: ^Band_Ctx($R), x: []f32, n, b, blocks_: int, lowband_in: []f32, lm: int, lowband_out: []f32, gain: f32, lowband_scratch: []f32, fill_: u32) -> u32 {
 	n0 := n
 	n_b := n / blocks_
 	blocks, fill := blocks_, fill_
@@ -494,6 +744,7 @@ quant_band :: proc(ctx: ^Band_Ctx, x: []f32, n, b, blocks_: int, lowband_in: []f
 	@(static, rodata)
 	BIT_INTERLEAVE := [16]u32{0, 1, 1, 1, 2, 3, 3, 3, 2, 3, 3, 3, 2, 3, 3, 3}
 	for k in 0 ..< recombine {
+		when R == Range_Encoder do haar1(x, n >> uint(k), 1 << uint(k))
 		if lowband != nil do haar1(lowband, n >> uint(k), 1 << uint(k))
 		fill = BIT_INTERLEAVE[fill & 0xF] | BIT_INTERLEAVE[fill >> 4] << 2
 	}
@@ -502,6 +753,7 @@ quant_band :: proc(ctx: ^Band_Ctx, x: []f32, n, b, blocks_: int, lowband_in: []f
 	// Increasing the time resolution.
 	time_divide := 0
 	for n_b & 1 == 0 && tf_change < 0 {
+		when R == Range_Encoder do haar1(x, n_b, blocks)
 		if lowband != nil do haar1(lowband, n_b, blocks)
 		fill |= fill << uint(blocks)
 		blocks <<= 1
@@ -512,7 +764,10 @@ quant_band :: proc(ctx: ^Band_Ctx, x: []f32, n, b, blocks_: int, lowband_in: []f
 	b0 = blocks
 	n_b0 := n_b
 	// Short blocks to time order.
-	if b0 > 1 && lowband != nil do deinterleave(lowband, n_b >> uint(recombine), b0 << uint(recombine), long_blocks)
+	if b0 > 1 {
+		when R == Range_Encoder do deinterleave(x, n_b >> uint(recombine), b0 << uint(recombine), long_blocks)
+		if lowband != nil do deinterleave(lowband, n_b >> uint(recombine), b0 << uint(recombine), long_blocks)
+	}
 	cm := quant_partition(ctx, x, n, b, blocks, lowband, lm, gain, fill)
 	if b0 > 1 do interleave(x, n_b >> uint(recombine), b0 << uint(recombine), long_blocks)
 	n_b = n_b0
@@ -540,12 +795,23 @@ quant_band :: proc(ctx: ^Band_Ctx, x: []f32, n, b, blocks_: int, lowband_in: []f
 
 // A stereo band: mid and side split by theta.
 @(private)
-quant_band_stereo :: proc(ctx: ^Band_Ctx, x, y: []f32, n, b_, blocks: int, lowband: []f32, lm: int, lowband_out: []f32, lowband_scratch: []f32, fill_: u32) -> u32 {
+quant_band_stereo :: proc(ctx: ^Band_Ctx($R), x, y: []f32, n, b_, blocks: int, lowband: []f32, lm: int, lowband_out: []f32, lowband_scratch: []f32, fill_: u32) -> u32 {
 	if n == 1 do return quant_band_n1(ctx, x, y, lowband_out)
 	b, fill := b_, fill_
 	orig_fill := fill
+	when R == Range_Encoder {
+		// A silent channel takes the other's shape.
+		e := ctx.band_e
+		if e[0][ctx.i] < MIN_STEREO_ENERGY || e[1][ctx.i] < MIN_STEREO_ENERGY {
+			if e[0][ctx.i] > e[1][ctx.i] {
+				copy(y[:n], x[:n])
+			} else {
+				copy(x[:n], y[:n])
+			}
+		}
+	}
 	sc: Split
-	compute_theta(ctx, &sc, n, &b, blocks, blocks, lm, true, &fill)
+	compute_theta(ctx, &sc, x, y, n, &b, blocks, blocks, lm, true, &fill)
 	mid := (1.0 / 32768) * f32(sc.imid)
 	side := (1.0 / 32768) * f32(sc.iside)
 	cm: u32
@@ -557,7 +823,15 @@ quant_band_stereo :: proc(ctx: ^Band_Ctx, x, y: []f32, n, b_, blocks: int, lowba
 		ctx.remaining_bits -= sc.qalloc + sbits
 		x2, y2 := c ? y : x, c ? x : y
 		sign: f32 = 1
-		if sbits != 0 && range_bits(ctx.r, 1) != 0 do sign = -1
+		if sbits != 0 {
+			when R == Range_Encoder {
+				negative := x2[0] * y2[1] - x2[1] * y2[0] < 0
+				range_encode_bits(ctx.r, negative ? 1 : 0, 1)
+				if negative do sign = -1
+			} else {
+				if range_bits(ctx.r, 1) != 0 do sign = -1
+			}
+		}
 		cm = quant_band(ctx, x2, n, mbits, blocks, lowband, lm, lowband_out, 1, lowband_scratch, orig_fill)
 		y2[0] = -sign * x2[1]
 		y2[1] = sign * x2[0]
@@ -615,26 +889,48 @@ stereo_merge :: proc(x, y: []f32, mid: f32) {
 	}
 }
 
-// All bands of a frame into c.x (RFC 6716 4.3.4).
+// Where the second band folds from in hybrid frames: enough of the first.
 @(private)
-bands_decode :: proc(c: ^Celt, r: ^Range_Decoder, start, end: int, a: ^Allocation, short_blocks: int, spread: Spread, tf_res: ^[NB_BANDS]int, total_bits, lm, ch: int) {
+hybrid_folding :: proc(norm, norm2: []f32, start, m: int, dual_stereo: bool) {
+	n1 := m * int(EBANDS[start + 1] - EBANDS[start])
+	n2 := m * int(EBANDS[start + 2] - EBANDS[start + 1])
+	if n2 <= n1 do return
+	copy(norm[n1:n2], norm[2 * n1 - n2:][:n2 - n1])
+	if dual_stereo do copy(norm2[n1:n2], norm2[2 * n1 - n2:][:n2 - n1])
+}
+
+// The planes all bands of a frame are coded through: the normalised
+// spectrum by channel (decoded into, or encoded from and reconstructed),
+// the folding sources, and per band and channel the collapse masks.
+@(private)
+Band_Planes :: struct {
+	x, y:            []f32, // y nil for one coded channel
+	norm, norm2:     []f32,
+	lowband_scratch: []f32, // one band of folding scratch
+	collapse:        []u8,
+	seed:            ^u32,
+	disable_inv:     bool,
+	band_e:          ^[2][NB_BANDS]f32, // encoding: amplitudes for stereo
+	theta_rdo:       bool, // encoding: stereo angles rounded both ways, the closer kept
+}
+
+// All bands of a frame (RFC 6716 4.3.4).
+@(private)
+quant_all_bands :: proc(r: ^$R, p: Band_Planes, start, end: int, a: ^Allocation, short_blocks: int, spread: Spread, tf_res: ^[NB_BANDS]int, total_bits, lm, ch: int) {
 	m := 1 << uint(lm)
 	blocks := short_blocks != 0 ? m : 1
 	norm_offset := m * int(EBANDS[start])
-	x_all := c.x[0][:]
-	y_all: []f32 = ch == 2 ? c.x[1][:] : nil
-	norm := c.norm[0][:]
-	norm2 := c.norm[1][:]
-	// The last band's room in x is free until it is decoded.
-	lowband_scratch := x_all[m * int(EBANDS[NB_BANDS - 1]):]
-	ctx := Band_Ctx {
+	norm, norm2 := p.norm, p.norm2
+	ctx := Band_Ctx(R) {
 		r                 = r,
 		intensity         = a.intensity,
 		spread            = spread,
-		seed              = c.rng,
+		seed              = p.seed^,
 		avoid_split_noise = blocks > 1,
-		disable_inv       = c.channels == 1,
+		disable_inv       = p.disable_inv,
+		band_e            = p.band_e,
 	}
+	theta_rdo := p.theta_rdo && p.y != nil && !a.dual_stereo
 	balance := a.balance
 	dual_stereo := a.dual_stereo
 	lowband_offset := 0
@@ -642,8 +938,8 @@ bands_decode :: proc(c: ^Celt, r: ^Range_Decoder, start, end: int, a: ^Allocatio
 	for i in start ..< end {
 		ctx.i = i
 		last := i == end - 1
-		x := x_all[m * int(EBANDS[i]):]
-		y: []f32 = y_all != nil ? y_all[m * int(EBANDS[i]):] : nil
+		x := p.x[m * int(EBANDS[i]):]
+		y: []f32 = p.y != nil ? p.y[m * int(EBANDS[i]):] : nil
 		n := m * int(EBANDS[i + 1]) - m * int(EBANDS[i])
 		tell := range_tell_frac(r)
 		if i != start do balance -= tell
@@ -655,17 +951,9 @@ bands_decode :: proc(c: ^Celt, r: ^Range_Decoder, start, end: int, a: ^Allocatio
 			b = max(0, min(16383, min(remaining + 1, a.pulses[i] + curr_balance)))
 		}
 		if (m * int(EBANDS[i]) - n >= m * int(EBANDS[start]) || i == start + 1) && (update_lowband || lowband_offset == 0) do lowband_offset = i
-		if i == start + 1 {
-			// Enough of the first band to fold the second (hybrid only).
-			n1 := m * int(EBANDS[start + 1] - EBANDS[start])
-			n2 := m * int(EBANDS[start + 2] - EBANDS[start + 1])
-			if n2 > n1 {
-				copy(norm[n1:n2], norm[2 * n1 - n2:][:n2 - n1])
-				if dual_stereo do copy(norm2[n1:n2], norm2[2 * n1 - n2:][:n2 - n1])
-			}
-		}
+		if i == start + 1 do hybrid_folding(norm, norm2, start, m, dual_stereo)
 		ctx.tf_change = tf_res[i]
-		scratch := last ? nil : lowband_scratch
+		scratch := last && !theta_rdo ? nil : p.lowband_scratch
 		// Collapse masks of the bands folded from.
 		x_cm, y_cm: u32
 		effective_lowband := -1
@@ -682,8 +970,8 @@ bands_decode :: proc(c: ^Celt, r: ^Range_Decoder, start, end: int, a: ^Allocatio
 				if !(fold_end < i && m * int(EBANDS[fold_end]) < effective_lowband + norm_offset + n) do break
 			}
 			for fold_i := fold_start; fold_i < fold_end; fold_i += 1 {
-				x_cm |= u32(c.collapse[fold_i * ch])
-				y_cm |= u32(c.collapse[fold_i * ch + ch - 1])
+				x_cm |= u32(p.collapse[fold_i * ch])
+				y_cm |= u32(p.collapse[fold_i * ch + ch - 1])
 			}
 		} else {
 			x_cm = (1 << uint(blocks)) - 1
@@ -702,20 +990,75 @@ bands_decode :: proc(c: ^Celt, r: ^Range_Decoder, start, end: int, a: ^Allocatio
 			y_cm = quant_band(&ctx, y, n, b / 2, blocks, lowband2, lm, out2, 1, scratch, y_cm)
 		} else {
 			if y != nil {
-				x_cm = quant_band_stereo(&ctx, x, y, n, b, blocks, lowband, lm, out, scratch, x_cm | y_cm)
+				when R == Range_Encoder {
+					if theta_rdo && i < a.intensity {
+						x_cm = quant_band_stereo_rdo(&ctx, x, y, n, b, blocks, lowband, lm, out, scratch, x_cm | y_cm, norm, norm2, start, m, dual_stereo)
+					} else {
+						ctx.theta_round = 0
+						x_cm = quant_band_stereo(&ctx, x, y, n, b, blocks, lowband, lm, out, scratch, x_cm | y_cm)
+					}
+				} else {
+					x_cm = quant_band_stereo(&ctx, x, y, n, b, blocks, lowband, lm, out, scratch, x_cm | y_cm)
+				}
 			} else {
 				x_cm = quant_band(&ctx, x, n, b, blocks, lowband, lm, out, 1, scratch, x_cm | y_cm)
 			}
 			y_cm = x_cm
 		}
-		c.collapse[i * ch] = u8(x_cm)
-		c.collapse[i * ch + ch - 1] = u8(y_cm)
+		p.collapse[i * ch] = u8(x_cm)
+		p.collapse[i * ch + ch - 1] = u8(y_cm)
 		balance += a.pulses[i] + tell
 		// Fold from this band only while it has at least a bit per sample.
 		update_lowband = b > n << BITRES
 		ctx.avoid_split_noise = false
 	}
-	c.rng = ctx.seed
+	p.seed^ = ctx.seed
+}
+
+// A stereo band coded with its angle rounded down and then up, keeping the
+// one closer to the input, weighted by the channels' amplitudes.
+@(private)
+quant_band_stereo_rdo :: proc(ctx: ^Band_Ctx(Range_Encoder), x, y: []f32, n, b, blocks: int, lowband: []f32, lm: int, out, scratch: []f32, cm: u32, norm, norm2: []f32, start, m: int, dual_stereo: bool) -> u32 {
+	r := ctx.r
+	// The weights a little more even than the amplitudes.
+	ex, ey := ctx.band_e[0][ctx.i], ctx.band_e[1][ctx.i]
+	min_e := min(ex, ey)
+	w0, w1 := ex + min_e / 3, ey + min_e / 3
+	x_in, y_in, x_down, y_down, out_down: [176]f32
+	copy(x_in[:n], x[:n])
+	copy(y_in[:n], y[:n])
+	r_in := r^
+	ctx_in := ctx^
+
+	ctx.theta_round = -1
+	cm_down := quant_band_stereo(ctx, x, y, n, b, blocks, lowband, lm, out, scratch, cm)
+	dist_down := w0 * dot(x_in[:n], x[:n]) + w1 * dot(y_in[:n], y[:n])
+	r_down := r^
+	ctx_down := ctx^
+	copy(x_down[:n], x[:n])
+	copy(y_down[:n], y[:n])
+	if out != nil do copy(out_down[:n], out[:n])
+	// The bytes either attempt can write.
+	bytes_down: [1275]u8
+	written := r_in.data[r_in.offs:]
+	copy(bytes_down[:], written)
+
+	r^ = r_in
+	ctx^ = ctx_in
+	copy(x[:n], x_in[:n])
+	copy(y[:n], y_in[:n])
+	if ctx.i == start + 1 do hybrid_folding(norm, norm2, start, m, dual_stereo)
+	ctx.theta_round = 1
+	cm_up := quant_band_stereo(ctx, x, y, n, b, blocks, lowband, lm, out, scratch, cm)
+	dist_up := w0 * dot(x_in[:n], x[:n]) + w1 * dot(y_in[:n], y[:n])
+	if dist_down < dist_up do return cm_up
+	r^ = r_down
+	ctx^ = ctx_down
+	copy(x[:n], x_down[:n])
+	copy(y[:n], y_down[:n])
+	if out != nil do copy(out[:n], out_down[:n])
+	copy(written, bytes_down[:len(written)])
+	return cm_down
 }
 
 // Noise into short blocks that got no pulses after a transient (RFC 6716

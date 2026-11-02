@@ -165,13 +165,13 @@ range_bits :: proc(r: ^Range_Decoder, bits: uint) -> u32 {
 	return v
 }
 
-// Bits used so far, rounded up.
-range_tell :: #force_inline proc(r: ^Range_Decoder) -> int {
+// Bits used so far, rounded up (by a decoder or an encoder).
+range_tell :: #force_inline proc(r: ^$R) -> int {
 	return r.nbits_total - ilog(r.rng)
 }
 
 // Bits used so far in 1/8 bits.
-range_tell_frac :: proc(r: ^Range_Decoder) -> int {
+range_tell_frac :: proc(r: ^$R) -> int {
 	@(static, rodata)
 	CORRECTION := [8]u32{35733, 38967, 42495, 46340, 50535, 55109, 60097, 65535}
 	nbits := r.nbits_total << BITRES

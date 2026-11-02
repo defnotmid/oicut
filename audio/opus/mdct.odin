@@ -2,10 +2,11 @@ package opus
 
 import "core:math"
 
-// CELT's inverse MDCT (RFC 6716 4.3.7): an N/4-point complex FFT between a
-// pre- and a post-rotation, then the windowed TDAC overlap with the previous
-// block. N is 1920 >> shift: 1920 for a 20 ms long block, 240 for a short
-// block, so the FFTs are 480, 240, 120 and 60 points (radices 4, 2, 3, 5).
+// CELT's MDCTs (RFC 6716 4.3.7): an N/4-point complex FFT between a pre- and
+// a post-rotation; the inverse then overlaps with the previous block (TDAC),
+// the forward folds its windowed input first. N is 1920 >> shift: 1920 for a
+// 20 ms long block, 240 for a short block, so the FFTs are 480, 240, 120 and
+// 60 points (radices 4, 2, 3, 5).
 //
 // The FFT is laid out for its loops: split real and imaginary arrays, an
 // input permutation the pre-rotation writes through, then in-place stages
@@ -228,5 +229,57 @@ imdct :: proc(t: ^Mdct_Tables, input: []f32, stride: int, out: []f32, shift: int
 		x2 := out[i]
 		out[i] = x2 * WINDOW[OVERLAP - 1 - i] - x1 * WINDOW[i]
 		out[OVERLAP - 1 - i] = x2 * WINDOW[i] + x1 * WINDOW[OVERLAP - 1 - i]
+	}
+}
+
+// The forward MDCT of N/2 + OVERLAP samples (windowed over the first and
+// last OVERLAP) into the N/2 coefficients out[0], out[stride], ...
+@(private)
+mdct_forward :: proc(t: ^Mdct_Tables, input: []f32, out: []f32, stride: int, shift: int, f: ^Fft_Scratch) {
+	n := MDCT_N >> uint(shift)
+	n2, n4 := n / 2, n / 4
+	trig_at := 0
+	for s in 0 ..< shift do trig_at += (MDCT_N >> uint(s)) / 2
+	trig := t.trig[trig_at:][:n2]
+	plan := &t.plans[shift]
+	// Window, shuffle and fold the four quarters [a, b, c, d] into N/4
+	// complex values: (-d - c reversed, -b + a reversed) at the windowed
+	// ends, (a - b reversed, -c - d reversed) between.
+	fold: [MDCT_N / 2]f32
+	ends :: (OVERLAP + 3) >> 2
+	x1, x2 := OVERLAP / 2, n2 - 1 + OVERLAP / 2
+	w1, w2 := OVERLAP / 2, OVERLAP / 2 - 1
+	y := 0
+	#no_bounds_check {
+		for _ in 0 ..< ends {
+			fold[y] = input[x1 + n2] * WINDOW[w2] + input[x2] * WINDOW[w1]
+			fold[y + 1] = input[x1] * WINDOW[w1] - input[x2 - n2] * WINDOW[w2]
+			y, x1, x2, w1, w2 = y + 2, x1 + 2, x2 - 2, w1 + 2, w2 - 2
+		}
+		for _ in ends ..< n4 - ends {
+			fold[y], fold[y + 1] = input[x2], input[x1]
+			y, x1, x2 = y + 2, x1 + 2, x2 - 2
+		}
+		w1, w2 = 0, OVERLAP - 1
+		for _ in n4 - ends ..< n4 {
+			fold[y] = input[x2] * WINDOW[w2] - input[x1 - n2] * WINDOW[w1]
+			fold[y + 1] = input[x1] * WINDOW[w2] + input[x2 + n2] * WINDOW[w1]
+			y, x1, x2, w1, w2 = y + 2, x1 + 2, x2 - 2, w1 + 2, w2 - 2
+		}
+	}
+	// Pre-rotation, scaled by 1/(N/4), written in the FFT's input order.
+	scale := 1 / f32(n4)
+	re, im := f.re[:n4], f.im[:n4]
+	#no_bounds_check for q in 0 ..< n4 {
+		i := int(plan.perm[q])
+		a, b := fold[2 * i], fold[2 * i + 1]
+		re[q] = (a * trig[i] - b * trig[n4 + i]) * scale
+		im[q] = (b * trig[i] + a * trig[n4 + i]) * scale
+	}
+	fft(plan, t, re, im)
+	// Post-rotation, the halves of each pair to opposite ends.
+	#no_bounds_check for i in 0 ..< n4 {
+		out[2 * i * stride] = im[i] * trig[n4 + i] - re[i] * trig[i]
+		out[(n2 - 1 - 2 * i) * stride] = re[i] * trig[n4 + i] + im[i] * trig[i]
 	}
 }

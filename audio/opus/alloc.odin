@@ -19,7 +19,10 @@ Allocation :: struct {
 }
 
 @(private)
-compute_allocation :: proc(a: ^Allocation, r: ^Range_Decoder, start, end: int, offsets, caps: ^[NB_BANDS]int, alloc_trim, total_bits, ch, lm: int) {
+// Encoding, a.intensity and a.dual_stereo come in as the encoder's choices, and
+// bands are kept down to signal_bandwidth with hysteresis around
+// prev_coded, the last frame's coded bands.
+compute_allocation :: proc(a: ^Allocation, r: ^$R, start, end: int, offsets, caps: ^[NB_BANDS]int, alloc_trim, total_bits, ch, lm: int, prev_coded := 0, signal_bandwidth := 0) {
 	total := max(total_bits, 0)
 	skip_start := start
 	skip_rsv := total >= 1 << BITRES ? 1 << BITRES : 0
@@ -83,11 +86,11 @@ compute_allocation :: proc(a: ^Allocation, r: ^Range_Decoder, start, end: int, o
 		bits1[j] = b1
 		bits2[j] = max(0, b2 - b1)
 	}
-	interpolate_bits(a, r, start, end, skip_start, &bits1, &bits2, &thresh, caps, total, skip_rsv, intensity_rsv, dual_stereo_rsv, ch, lm)
+	interpolate_bits(a, r, start, end, skip_start, &bits1, &bits2, &thresh, caps, total, skip_rsv, intensity_rsv, dual_stereo_rsv, ch, lm, prev_coded, signal_bandwidth)
 }
 
 @(private)
-interpolate_bits :: proc(a: ^Allocation, r: ^Range_Decoder, start, end, skip_start: int, bits1, bits2, thresh, caps: ^[NB_BANDS]int, total_bits, skip_rsv, intensity_reserve, dual_stereo_reserve, ch, lm: int) {
+interpolate_bits :: proc(a: ^Allocation, r: ^$R, start, end, skip_start: int, bits1, bits2, thresh, caps: ^[NB_BANDS]int, total_bits, skip_rsv, intensity_reserve, dual_stereo_reserve, ch, lm, prev_coded, signal_bandwidth: int) {
 	total := total_bits
 	intensity_rsv := intensity_reserve
 	dual_stereo_rsv := dual_stereo_reserve
@@ -146,7 +149,17 @@ interpolate_bits :: proc(a: ^Allocation, r: ^Range_Decoder, start, end, skip_sta
 		band_bits := bits[j] + percoeff * band_width + rem
 		// The flag is coded only above the band's threshold; below it, skipped.
 		if band_bits >= max(thresh[j], alloc_floor + 1 << BITRES) {
-			if range_bit_logp(r, 1) do break
+			when R == Range_Encoder {
+				// The one choice here the bitstream leaves free: keep the band
+				// while deep enough, with hysteresis against flicker.
+				depth_threshold := 0
+				if coded > 17 do depth_threshold = j < prev_coded ? 7 : 9
+				keep := coded <= start + 2 || (band_bits > (depth_threshold * band_width << uint(lm) << BITRES) >> 4 && j <= signal_bandwidth)
+				range_encode_bit_logp(r, keep, 1)
+				if keep do break
+			} else {
+				if range_bit_logp(r, 1) do break
+			}
 			psum += 1 << BITRES
 			band_bits -= 1 << BITRES
 		}
@@ -161,12 +174,29 @@ interpolate_bits :: proc(a: ^Allocation, r: ^Range_Decoder, start, end, skip_sta
 		}
 	}
 	a.coded_bands = coded
-	a.intensity = intensity_rsv > 0 ? start + int(range_uint(r, u32(coded + 1 - start))) : 0
+	when R == Range_Encoder {
+		if intensity_rsv > 0 {
+			a.intensity = min(a.intensity, coded)
+			range_encode_uint(r, u32(a.intensity - start), u32(coded + 1 - start))
+		} else {
+			a.intensity = 0
+		}
+	} else {
+		a.intensity = intensity_rsv > 0 ? start + int(range_uint(r, u32(coded + 1 - start))) : 0
+	}
 	if a.intensity <= start {
 		total += dual_stereo_rsv
 		dual_stereo_rsv = 0
 	}
-	a.dual_stereo = dual_stereo_rsv > 0 ? range_bit_logp(r, 1) : false
+	when R == Range_Encoder {
+		if dual_stereo_rsv > 0 {
+			range_encode_bit_logp(r, a.dual_stereo, 1)
+		} else {
+			a.dual_stereo = false
+		}
+	} else {
+		a.dual_stereo = dual_stereo_rsv > 0 ? range_bit_logp(r, 1) : false
+	}
 	// The rest spread evenly over the coded bands.
 	left := total - psum
 	percoeff := left / int(EBANDS[coded] - EBANDS[start])

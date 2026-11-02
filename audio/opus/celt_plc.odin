@@ -1,6 +1,7 @@
 package opus
 
 import "core:math"
+import "core:simd"
 
 // CELT loss concealment (RFC 6716 4.4): the first lost frames repeat the
 // last pitch period of the excitation through an LPC fit of the signal,
@@ -53,12 +54,14 @@ celt_conceal :: proc(c: ^Celt, n, lm: int) {
 		synthesis(c, start, eff_end, cc, cc, false, lm, false)
 		// The postfilter continues unchanged.
 		for k in 0 ..< cc {
-			c.postfilter_period = max(c.postfilter_period, COMBFILTER_MINPERIOD)
-			c.postfilter_period_old = max(c.postfilter_period_old, COMBFILTER_MINPERIOD)
-			comb_filter(c.history[k][:], DECODE_BUFFER - n, c.postfilter_period_old, c.postfilter_period, SHORT_MDCT, c.postfilter_gain_old, c.postfilter_gain, c.postfilter_tapset_old, c.postfilter_tapset)
-			if lm != 0 do comb_filter(c.history[k][:], DECODE_BUFFER - n + SHORT_MDCT, c.postfilter_period, c.postfilter_period, n - SHORT_MDCT, c.postfilter_gain, c.postfilter_gain, c.postfilter_tapset, c.postfilter_tapset)
+			h := c.history[k][:]
+			at := DECODE_BUFFER - n
+			c.postfilter.period = max(c.postfilter.period, COMBFILTER_MINPERIOD)
+			c.postfilter_old.period = max(c.postfilter_old.period, COMBFILTER_MINPERIOD)
+			comb_filter(h, at, h, at, SHORT_MDCT, c.postfilter_old, c.postfilter, true)
+			if lm != 0 do comb_filter(h, at + SHORT_MDCT, h, at + SHORT_MDCT, n - SHORT_MDCT, c.postfilter, c.postfilter, true)
 		}
-		c.postfilter_period_old, c.postfilter_gain_old, c.postfilter_tapset_old = c.postfilter_period, c.postfilter_gain, c.postfilter_tapset
+		c.postfilter_old = c.postfilter
 		c.fold = false
 		c.skip_plc = true // until two frames in a row decode
 	} else {
@@ -176,16 +179,13 @@ conceal_periodic :: proc(c: ^Celt, n: int) {
 @(private)
 prefilter_and_fold :: proc(c: ^Celt, n: int) {
 	at := DECODE_BUFFER - n
-	g := -c.postfilter_gain
-	t := max(c.postfilter_period, COMBFILTER_MINPERIOD)
-	g0, g1, g2 := g * COMB_GAINS[c.postfilter_tapset][0], g * COMB_GAINS[c.postfilter_tapset][1], g * COMB_GAINS[c.postfilter_tapset][2]
+	// The encoder's prefilter: the postfilter with its gain negated.
+	pre := c.postfilter
+	pre.gain = -pre.gain
 	for k in 0 ..< c.channels {
 		x := c.history[k][:]
 		e: [OVERLAP]f32
-		for i in 0 ..< OVERLAP {
-			p := at + i
-			e[i] = g == 0 ? x[p] : x[p] + g0 * x[p - t] + g1 * (x[p - t + 1] + x[p - t - 1]) + g2 * (x[p - t + 2] + x[p - t - 2])
-		}
+		comb_filter(e[:], 0, x, at, OVERLAP, pre, pre, false)
 		for i in 0 ..< OVERLAP / 2 do x[at + i] = WINDOW[i] * e[OVERLAP - 1 - i] + WINDOW[OVERLAP - 1 - i] * e[i]
 	}
 }
@@ -194,16 +194,16 @@ prefilter_and_fold :: proc(c: ^Celt, n: int) {
 @(private)
 plc_pitch_search :: proc(c: ^Celt) -> int {
 	lp: [DECODE_BUFFER / 2]f32
-	pitch_downsample(c, lp[:])
+	pitch_downsample({c.history[0][:], c.history[1][:]}, c.channels, lp[:])
 	return PLC_PITCH_LAG_MAX - pitch_search(lp[PLC_PITCH_LAG_MAX / 2:], lp[:], DECODE_BUFFER - PLC_PITCH_LAG_MAX, PLC_PITCH_LAG_MAX - PLC_PITCH_LAG_MIN)
 }
 
-// The history at half rate (channels summed), whitened by a 4th-order LPC
+// x at half rate (channels summed) into lp, whitened by a 4th-order LPC
 // with a zero added.
 @(private)
-pitch_downsample :: proc(c: ^Celt, lp: []f32) {
-	for k in 0 ..< c.channels {
-		x := c.history[k][:]
+pitch_downsample :: proc(x_: [2][]f32, channels: int, lp: []f32) {
+	for k in 0 ..< channels {
+		x := x_[k]
 		v := 0.25 * x[1] + 0.5 * x[0]
 		lp[0] = k == 0 ? v : lp[0] + v
 		for i in 1 ..< len(lp) {
@@ -238,13 +238,14 @@ pitch_downsample :: proc(c: ^Celt, lp: []f32) {
 // by pseudo-interpolation.
 @(private)
 pitch_search :: proc(x, y: []f32, length, max_pitch: int) -> int {
+	// For concealment's and the prefilter's lengths and lags.
 	x4: [(DECODE_BUFFER - PLC_PITCH_LAG_MAX) >> 2]f32
 	y4: [DECODE_BUFFER >> 2]f32
-	xcorr: [(PLC_PITCH_LAG_MAX - PLC_PITCH_LAG_MIN) >> 1]f32
+	xcorr: [COMBFILTER_MAXPERIOD >> 1]f32
 	lag := length + max_pitch
 	for j in 0 ..< length >> 2 do x4[j] = x[2 * j]
 	for j in 0 ..< lag >> 2 do y4[j] = y[2 * j]
-	for i in 0 ..< max_pitch >> 2 do xcorr[i] = dot(x4[:length >> 2], y4[i:][:length >> 2])
+	pitch_xcorr(x4[:length >> 2], y4[:], xcorr[:max_pitch >> 2])
 	best := find_best_pitch(xcorr[:max_pitch >> 2], y4[:], length >> 2)
 	for i in 0 ..< max_pitch >> 1 {
 		xcorr[i] = 0
@@ -262,6 +263,22 @@ pitch_search :: proc(x, y: []f32, length, max_pitch: int) -> int {
 		}
 	}
 	return 2 * best[0] - offset
+}
+
+// xcorr[i] = x . y[i:][:len(x)] for every lag i: lanes take consecutive
+// lags, each summing in dot's order, so the results are dot's.
+@(private)
+pitch_xcorr :: proc(x, y: []f32, xcorr: []f32) {
+	L :: 8
+	V :: #simd[L]f32
+	i := 0
+	for ; i + L <= len(xcorr); i += L {
+		sum: V
+		#no_bounds_check for v, j in x do sum += V(v) * simd.from_slice(V, y[i + j:])
+		lanes := simd.to_array(sum)
+		copy(xcorr[i:], lanes[:])
+	}
+	for ; i < len(xcorr); i += 1 do xcorr[i] = dot(x, y[i:][:len(x)])
 }
 
 // The two lags of highest normalised correlation xcorr[i]^2 / |y[i:][:len]|^2.
@@ -291,10 +308,29 @@ find_best_pitch :: proc(xcorr: []f32, y: []f32, length: int) -> (best: [2]int) {
 	return
 }
 
+// Eight running sums, then their total: the products need not wait on
+// one another.
 @(private)
-dot :: #force_inline proc(x, y: []f32) -> (sum: f32) {
-	#no_bounds_check for i in 0 ..< len(x) do sum += x[i] * y[i]
-	return
+dot :: proc(x, y: []f32) -> f32 {
+	V :: #simd[8]f32
+	sums: V
+	i := 0
+	#no_bounds_check for ; i + 8 <= len(x); i += 8 do sums += simd.from_slice(V, x[i:]) * simd.from_slice(V, y[i:])
+	sum := simd.reduce_add_ordered(sums)
+	#no_bounds_check for ; i < len(x); i += 1 do sum += x[i] * y[i]
+	return sum
+}
+
+// The largest magnitude of x.
+@(private)
+max_abs :: proc(x: []f32) -> f32 {
+	V :: #simd[8]f32
+	peak: V
+	i := 0
+	#no_bounds_check for ; i + 8 <= len(x); i += 8 do peak = simd.max(peak, simd.abs(simd.from_slice(V, x[i:])))
+	m := simd.reduce_max(peak)
+	#no_bounds_check for ; i < len(x); i += 1 do m = max(m, abs(x[i]))
+	return m
 }
 
 // ac[k] = sum of x[i] x[i + k], x tapered by window at both ends.
