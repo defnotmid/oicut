@@ -327,7 +327,7 @@ encode_frame_internal :: proc(e: ^Encoder, planes: [3][]u8, strides: [3]int, is_
 		}
 	}
 	e.filter_levels = encoder_filter_levels(e)
-	e.allow_hp = !e.config.ultrafast && !e.keyframe && !e.lossless && e.q_idx < 128
+	e.allow_hp = !e.config.ultrafast && !e.keyframe && !e.lossless && e.q_idx < 64
 	e.frame_context_idx = e.keyframe ? 0 : clamp(e.frame_context_idx, 0, 3)
 	if e.keyframe {
 		vp9.default_probabilities(&e.probs)

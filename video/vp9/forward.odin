@@ -178,7 +178,8 @@ forward_transform :: proc(f: ^Forward_Transforms, block: []i32, tx_size, tx_type
 @(private)
 forward_lossy :: proc(block: []i32, tx_type: int, $n: uint, $E: typeid) #no_bounds_check {
 	N :: 1 << n
-	L :: min(N, 8)
+	MAX_L :: 16 when E == i32 && intrinsics.has_target_feature("avx512f") else 8
+	L :: min(N, MAX_L)
 	Vec :: #simd[L]E
 	W :: #simd[L]i32
 	vertical_adst := n < 5 && (tx_type == ADST_DCT || tx_type == ADST_ADST)
@@ -192,7 +193,11 @@ forward_lossy :: proc(block: []i32, tx_type: int, $n: uint, $E: typeid) #no_boun
 		t = common.transpose(t)
 		#unroll for i in 0 ..< N {
 			out := t[i]
-			when n == 3 do out = round2_lanes(out, 1)
+			when n == 3 {
+				out = round2_lanes(out, 1)
+			} else when n == 4 {
+				out = round2_lanes(out, 2)
+			}
 			intrinsics.unaligned_store((^W)(&block[i * N]), W(out))
 		}
 	} else {

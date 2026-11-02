@@ -44,7 +44,7 @@ inverse_transform_vec :: proc(
 			acc = simd.add(acc, simd.mul(b, (#simd[N]i32)(i32(src[i * N + j]))))
 		}
 
-		acc = simd.shr(simd.add(acc, r1), sh1)
+		acc = simd.shr_masked(simd.add(acc, r1), sh1)
 		intrinsics.unaligned_store((^#simd[N]i32)(&tmp[j * N]), simd.clamp(acc, lo, hi))
 	}
 
@@ -57,7 +57,7 @@ inverse_transform_vec :: proc(
 			acc = simd.add(acc, simd.mul(b, (#simd[N]i32)(tmp[i * N + j])))
 		}
 
-		acc = simd.clamp(simd.shr(simd.add(acc, r2), sh2), lo, hi)
+		acc = simd.clamp(simd.shr_masked(simd.add(acc, r2), sh2), lo, hi)
 		intrinsics.unaligned_store((^#simd[N]i16)(&dst[j * N]), (#simd[N]i16)(acc))
 	}
 }
@@ -95,14 +95,14 @@ inverse_dct :: proc($N: int, src, dst: []i16, bitdepth: int) #no_bounds_check {
 	lo, hi := (#simd[N]i32)(-32768), (#simd[N]i32)(32767)
 	for j in 0 ..< N {
 		acc := inverse_dct_line(N, src[j:], N)
-		acc = simd.clamp(simd.shr(acc + (#simd[N]i32)(64), (#simd[N]u32)(7)), lo, hi)
+		acc = simd.clamp(simd.shr_masked(acc + (#simd[N]i32)(64), (#simd[N]u32)(7)), lo, hi)
 		intrinsics.unaligned_store((^#simd[N]i32)(&tmp[j * N]), acc)
 	}
 	shift := u32(20 - bitdepth)
 	round := i32(1) << (shift - 1)
 	for j in 0 ..< N {
 		acc := inverse_dct_line(N, tmp[j:], N)
-		acc = simd.clamp(simd.shr(acc + (#simd[N]i32)(round), (#simd[N]u32)(shift)), lo, hi)
+		acc = simd.clamp(simd.shr_masked(acc + (#simd[N]i32)(round), (#simd[N]u32)(shift)), lo, hi)
 		intrinsics.unaligned_store((^#simd[N]i16)(&dst[j * N]), (#simd[N]i16)(acc))
 	}
 }

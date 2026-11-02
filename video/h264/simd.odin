@@ -21,7 +21,7 @@ clamp_lanes :: #force_inline proc(v: #simd[$N]$E, pixel_max: E = 255) -> #simd[N
 }
 
 shr_lanes :: #force_inline proc(v: #simd[$N]$E, $bits: uint) -> #simd[N]E {
-	return simd.shr(v, (#simd[N]intrinsics.type_integer_to_unsigned(E))(bits))
+	return simd.shr_masked(v, (#simd[N]intrinsics.type_integer_to_unsigned(E))(bits))
 }
 
 // (a + b + 1) >> 1 per lane

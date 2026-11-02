@@ -85,7 +85,7 @@ combine_lanes :: #force_inline proc(
 			simd.mul((W)(h264.load_lanes(N, src0)), (W)(weight.w0)),
 			simd.mul((W)(h264.load_lanes(N, src1)), (W)(weight.w1)),
 		)
-		v = simd.shr(
+		v = simd.shr_masked(
 			simd.add(v, (W)(i32(1) << uint(weight.log2_denom))),
 			(#simd[N]u32)(u32(weight.log2_denom + 1)),
 		)
@@ -99,7 +99,7 @@ combine_lanes :: #force_inline proc(
 			dir == h264.Prediction_Direction.List_0 ? weight.w0 : weight.w1,
 			dir == h264.Prediction_Direction.List_0 ? weight.o0 : weight.o1
 		v := simd.mul((W)(h264.load_lanes(N, src)), (W)(w))
-		if weight.log2_denom >= 1 do v = simd.shr(simd.add(v, (W)(i32(1) << uint(weight.log2_denom - 1))), (#simd[N]u32)(u32(weight.log2_denom)))
+		if weight.log2_denom >= 1 do v = simd.shr_masked(simd.add(v, (W)(i32(1) << uint(weight.log2_denom - 1))), (#simd[N]u32)(u32(weight.log2_denom)))
 		intrinsics.unaligned_store((^#simd[N]T)(dst), (#simd[N]T)(simd.clamp(simd.add(v, (W)(o)), 0, W(pixel_max))))
 	case:
 		src := dir == h264.Prediction_Direction.List_0 ? src0 : src1

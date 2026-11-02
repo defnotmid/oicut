@@ -67,7 +67,7 @@ sad_u16 :: proc(
 			bv := (#simd[SAD_LANES]i32)(
 				intrinsics.unaligned_load((^#simd[SAD_LANES]u16)(&b[j * b_stride + i])),
 			)
-			acc = simd.add(acc, intrinsics.simd_abs(simd.sub(av, bv)))
+			acc = simd.add(acc, simd.abs_diff(av, bv))
 		}
 		for ; i < w; i += 1 {
 			d := i32(a[j * a_stride + i]) - i32(b[j * b_stride + i])
@@ -193,7 +193,7 @@ forward_dct_vec :: proc(
 				}
 				acc = simd.add(acc, simd.mul(b, v))
 			}
-			acc = simd.shr(simd.add(acc, r1v), sh1v)
+			acc = simd.shr_masked(simd.add(acc, r1v), sh1v)
 			intrinsics.unaligned_store((^#simd[LANES]i32)(&tmp[j * N + c * LANES]), acc)
 		}
 	}
@@ -229,7 +229,7 @@ forward_dct_vec :: proc(
 				acc[c] = simd.add(acc[c], simd.mul(b, v))
 			}
 		}
-		for c in 0 ..< Chunks do acc[c] = simd.clamp(simd.shr(simd.add(acc[c], r2v), sh2v), min_v, max_v)
+		for c in 0 ..< Chunks do acc[c] = simd.clamp(simd.shr_masked(simd.add(acc[c], r2v), sh2v), min_v, max_v)
 
 		// All source samples have been consumed by the first dimension before
 		// any destination write. Caller-owned src/dst slices may overlap; the
@@ -288,7 +288,7 @@ forward_dst4_vec :: proc(
 			b := intrinsics.unaligned_load((^#simd[LANES]i32)(&basis_t[i * N]))
 			acc = simd.add(acc, simd.mul(b, (#simd[LANES]i32)(i32(src[j * src_stride + i]))))
 		}
-		acc = simd.shr(simd.add(acc, r1v), sh1v)
+		acc = simd.shr_masked(simd.add(acc, r1v), sh1v)
 		intrinsics.unaligned_store((^#simd[LANES]i32)(&tmp[j * N]), acc)
 	}
 	for r in 0 ..< N {
@@ -297,7 +297,7 @@ forward_dst4_vec :: proc(
 			b := intrinsics.unaligned_load((^#simd[LANES]i32)(&basis_t[i * N]))
 			acc = simd.add(acc, simd.mul(b, (#simd[LANES]i32)(tmp[i * N + r])))
 		}
-		acc = simd.shr(simd.add(acc, r2v), sh2v)
+		acc = simd.shr_masked(simd.add(acc, r2v), sh2v)
 		intrinsics.unaligned_store((^#simd[LANES]i32)(&out_t[r * N]), acc)
 	}
 	for r in 0 ..< N do for k in 0 ..< N do dst[k * N + r] = i16(clamp(out_t[r * N + k], -32768, 32767))
@@ -358,6 +358,27 @@ recon_plane_vec :: proc(
 	bit_depth: int,
 	sse: ^u64,
 ) #no_bounds_check {
+	if n == 4 {
+		zero4 := (#simd[4]i32)(0)
+		max4 := (#simd[4]i32)(i32(1) << uint(bit_depth) - 1)
+		sse4 := (#simd[4]i32)(0)
+		#unroll for j in 0 ..< 4 {
+			dst_row := dst.data[dst.offset + (y + j) * dst.stride + x:]
+			src_row := src.data[src.offset + (y + j) * src.stride + x:]
+			pred_row := pred[(pred_oy + j) * pred_stride + pred_ox:]
+			p := (#simd[4]i32)(intrinsics.unaligned_load((^#simd[4]u16)(&pred_row[0])))
+			if cbf {
+				r := (#simd[4]i32)(intrinsics.unaligned_load((^#simd[4]i16)(&q[j * 4])))
+				p = simd.clamp(simd.add(p, r), zero4, max4)
+			}
+			intrinsics.unaligned_store((^#simd[4]u16)(&dst_row[0]), (#simd[4]u16)(p))
+			s := (#simd[4]i32)(intrinsics.unaligned_load((^#simd[4]u16)(&src_row[0])))
+			d := simd.sub(s, p)
+			sse4 = simd.add(sse4, simd.mul(d, d))
+		}
+		sse^ += u64(simd.reduce_add_ordered(sse4))
+		return
+	}
 	zero := (#simd[RECON_LANES]i32)(0)
 	max_v := (#simd[RECON_LANES]i32)(i32(1) << uint(bit_depth) - 1)
 	sse_acc := (#simd[RECON_LANES]i32)(0)
@@ -402,6 +423,50 @@ recon_plane_vec :: proc(
 	}
 
 	sse^ += u64(simd.reduce_add_ordered(sse_acc)) + sse_tail
+}
+
+// Compute dst = src - pred for a size x size block and return true when any
+// residual sample is non-zero.
+@(private)
+sub_residual_vec :: #force_inline proc(
+	dst: []i16,
+	src: Plane(Sample),
+	x, y: int,
+	pred: []Sample,
+	pred_stride, pred_ox, pred_oy, size: int,
+) -> bool #no_bounds_check {
+	if size == 4 {
+		nz4 := (#simd[4]i16)(0)
+		#unroll for j in 0 ..< 4 {
+			s := (#simd[4]i16)(
+				intrinsics.unaligned_load(
+					(^#simd[4]u16)(&src.data[src.offset + (y + j) * src.stride + x]),
+				),
+			)
+			p := (#simd[4]i16)(
+				intrinsics.unaligned_load((^#simd[4]u16)(&pred[(pred_oy + j) * pred_stride + pred_ox])),
+			)
+			d := s - p
+			nz4 = simd.bit_or(nz4, d)
+			intrinsics.unaligned_store((^#simd[4]i16)(&dst[j * 4]), d)
+		}
+		return simd.reduce_or(nz4) != 0
+	}
+	LANES :: 8
+	nz_acc := (#simd[LANES]i16)(0)
+	for j in 0 ..< size {
+		src_row := src.data[src.offset + (y + j) * src.stride + x:]
+		pred_row := pred[(pred_oy + j) * pred_stride + pred_ox:]
+		dst_row := dst[j * size:]
+		for i := 0; i < size; i += LANES {
+			s := (#simd[LANES]i16)(intrinsics.unaligned_load((^#simd[LANES]u16)(&src_row[i])))
+			p := (#simd[LANES]i16)(intrinsics.unaligned_load((^#simd[LANES]u16)(&pred_row[i])))
+			d := s - p
+			nz_acc = simd.bit_or(nz_acc, d)
+			intrinsics.unaligned_store((^#simd[LANES]i16)(&dst_row[i]), d)
+		}
+	}
+	return simd.reduce_or(nz_acc) != 0
 }
 
 // Integer motion needs only edge replication, without interpolation scratch.
@@ -463,7 +528,7 @@ mc_uni_axis :: proc(
 				acc = simd.add(acc, simd.mul(v, (#simd[MC_LANES]i32)(filter[k])))
 			}
 			v := simd.clamp(
-				simd.shr(acc, (#simd[MC_LANES]u32)(6)),
+				simd.shr_masked(acc, (#simd[MC_LANES]u32)(6)),
 				(#simd[MC_LANES]i32)(0),
 				(#simd[MC_LANES]i32)(max_v),
 			)
@@ -554,7 +619,7 @@ mc_luma_horizontal :: proc(ref: ^Frame, ix, iy, w, rows, xf, bit_depth: int, hor
 				v := (#simd[MC_LANES]i32)(
 					intrinsics.unaligned_load((^#simd[MC_LANES]u16)(&samples[rx + 3])),
 				)
-				acc = simd.shl(v, (#simd[MC_LANES]u32)(6))
+				acc = simd.shl_masked(v, (#simd[MC_LANES]u32)(6))
 			} else {
 				for k in 0 ..< 8 {
 					v := (#simd[MC_LANES]i32)(
@@ -563,7 +628,7 @@ mc_luma_horizontal :: proc(ref: ^Frame, ix, iy, w, rows, xf, bit_depth: int, hor
 					acc = simd.add(acc, simd.mul(v, (#simd[MC_LANES]i32)(fh[k])))
 				}
 			}
-			if shift1 > 0 do acc = simd.shr(acc, (#simd[MC_LANES]u32)(u32(shift1)))
+			if shift1 > 0 do acc = simd.shr_masked(acc, (#simd[MC_LANES]u32)(u32(shift1)))
 			intrinsics.unaligned_store((^#simd[MC_LANES]i32)(&hor[ry][rx]), acc)
 		}
 		for ; rx < w; rx += 1 {
@@ -608,20 +673,20 @@ mc_luma_vertical :: proc(
 			acc := (#simd[MC_LANES]i32)(0)
 			if yf == 0 {
 				r := intrinsics.unaligned_load((^#simd[MC_LANES]i32)(&hor[oy + 3][hor_x + ox]))
-				acc = simd.shl(r, (#simd[MC_LANES]u32)(6))
+				acc = simd.shl_masked(r, (#simd[MC_LANES]u32)(6))
 			} else {
 				for k in 0 ..< 8 {
 					r := intrinsics.unaligned_load((^#simd[MC_LANES]i32)(&hor[oy + k][hor_x + ox]))
 					acc = simd.add(acc, simd.mul(r, (#simd[MC_LANES]i32)(fv[k])))
 				}
 			}
-			v := simd.shr(simd.add(simd.shr(acc, sh6), offv), sh3v)
+			v := simd.shr_masked(simd.add(simd.shr_masked(acc, sh6), offv), sh3v)
 			v = simd.clamp(v, zero, maxv)
 			when SCORE {
 				sample := (#simd[MC_LANES]i32)(
 					intrinsics.unaligned_load((^#simd[MC_LANES]u16)(&src[oy * src_stride + ox])),
 				)
-				sad_acc = simd.add(sad_acc, intrinsics.simd_abs(simd.sub(sample, v)))
+				sad_acc = simd.add(sad_acc, simd.abs_diff(sample, v))
 			} else {
 				intrinsics.unaligned_store(
 					(^#simd[MC_LANES]u16)(&dst[oy * dst_stride + ox]),
@@ -776,7 +841,7 @@ mc_chroma :: proc(
 				)
 				acc = simd.add(acc, simd.mul(v, (#simd[MC_LANES]i32)(fh[k])))
 			}
-			if shift1 > 0 do acc = simd.shr(acc, (#simd[MC_LANES]u32)(u32(shift1)))
+			if shift1 > 0 do acc = simd.shr_masked(acc, (#simd[MC_LANES]u32)(u32(shift1)))
 			intrinsics.unaligned_store((^#simd[MC_LANES]i32)(&hor[ry][rx]), acc)
 		}
 		for ; rx < w; rx += 1 {
@@ -799,7 +864,7 @@ mc_chroma :: proc(
 				r := intrinsics.unaligned_load((^#simd[MC_LANES]i32)(&hor[oy + k][ox]))
 				acc = simd.add(acc, simd.mul(r, (#simd[MC_LANES]i32)(fv[k])))
 			}
-			v := simd.shr(simd.add(simd.shr(acc, sh6), offv), sh3v)
+			v := simd.shr_masked(simd.add(simd.shr_masked(acc, sh6), offv), sh3v)
 			v = simd.clamp(v, zero, maxv)
 			intrinsics.unaligned_store(
 				(^#simd[MC_LANES]u16)(&dst[oy * dst_stride + ox]),

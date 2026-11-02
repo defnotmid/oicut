@@ -202,7 +202,7 @@ scale_16 :: #force_inline proc(levels: #simd[16]i32, scale: ^[16]i32, qp: i32) -
 	product := simd.mul(levels, intrinsics.unaligned_load((^#simd[16]i32)(scale)))
 	qp_per := u32(qp / 6)
 	if qp >= 24 do return simd.shl(product, (#simd[16]u32)(qp_per - 4))
-	return simd.shr(
+	return simd.shr_masked(
 		simd.add(product, (#simd[16]i32)(i32(1) << (3 - qp_per))),
 		(#simd[16]u32)(4 - qp_per),
 	)
@@ -328,7 +328,7 @@ reconstruct_8x8 :: proc(
 	if qp >= 36 {
 		coeffs = simd.shl(product, (#simd[64]u32)(qp_per - 6))
 	} else {
-		coeffs = simd.shr(
+		coeffs = simd.shr_masked(
 			simd.add(product, (#simd[64]i32)(i32(1) << (5 - qp_per))),
 			(#simd[64]u32)(6 - qp_per),
 		)
@@ -498,19 +498,19 @@ idct_4x4_add_lanes :: proc(
 	// Row pass: each row's 1-D transform, lanes are the rows
 	e0 := simd.add(c0, c2)
 	e1 := simd.sub(c0, c2)
-	e2 := simd.sub(simd.shr(c1, one), c3)
-	e3 := simd.add(c1, simd.shr(c3, one))
+	e2 := simd.sub(simd.shr_masked(c1, one), c3)
+	e3 := simd.add(c1, simd.shr_masked(c3, one))
 	f := common.transpose([4]V{simd.add(e0, e3), simd.add(e1, e2), simd.sub(e1, e2), simd.sub(e0, e3)})
 	f0, f1, f2, f3 := f[0], f[1], f[2], f[3]
 	// Column pass on the rows of f
 	g0 := simd.add(f0, f2)
 	g1 := simd.sub(f0, f2)
-	g2 := simd.sub(simd.shr(f1, one), f3)
-	g3 := simd.add(f1, simd.shr(f3, one))
+	g2 := simd.sub(simd.shr_masked(f1, one), f3)
+	g3 := simd.add(f1, simd.shr_masked(f3, one))
 	rows := [4]V{simd.add(g0, g3), simd.add(g1, g2), simd.sub(g1, g2), simd.sub(g0, g3)}
 	for y in 0 ..< 4 {
 		pred := (V)(intrinsics.unaligned_load((^#simd[4]T)(&pixels[y * stride])))
-		v := simd.add(pred, simd.shr(simd.add(rows[y], 32), (#simd[4]u32)(6)))
+		v := simd.add(pred, simd.shr_masked(simd.add(rows[y], 32), (#simd[4]u32)(6)))
 		intrinsics.unaligned_store(
 			(^#simd[4]T)(&pixels[y * stride]),
 			(#simd[4]T)(simd.clamp(v, 0, V(pixel_max))),
@@ -537,21 +537,21 @@ idct_8x8_add_lanes :: proc(
 	pass :: #force_inline proc(d: [8]V) -> [8]V {
 		one, two := (#simd[8]u32)(1), (#simd[8]u32)(2)
 		a0 := simd.add(d[0], d[4])
-		a1 := simd.sub(simd.sub(simd.sub(d[5], d[3]), d[7]), simd.shr(d[7], one))
+		a1 := simd.sub(simd.sub(simd.sub(d[5], d[3]), d[7]), simd.shr_masked(d[7], one))
 		a2 := simd.sub(d[0], d[4])
-		a3 := simd.sub(simd.sub(simd.add(d[1], d[7]), d[3]), simd.shr(d[3], one))
-		a4 := simd.sub(simd.shr(d[2], one), d[6])
-		a5 := simd.add(simd.add(simd.sub(d[7], d[1]), d[5]), simd.shr(d[5], one))
-		a6 := simd.add(d[2], simd.shr(d[6], one))
-		a7 := simd.add(simd.add(simd.add(d[3], d[5]), d[1]), simd.shr(d[1], one))
+		a3 := simd.sub(simd.sub(simd.add(d[1], d[7]), d[3]), simd.shr_masked(d[3], one))
+		a4 := simd.sub(simd.shr_masked(d[2], one), d[6])
+		a5 := simd.add(simd.add(simd.sub(d[7], d[1]), d[5]), simd.shr_masked(d[5], one))
+		a6 := simd.add(d[2], simd.shr_masked(d[6], one))
+		a7 := simd.add(simd.add(simd.add(d[3], d[5]), d[1]), simd.shr_masked(d[1], one))
 		b0 := simd.add(a0, a6)
-		b1 := simd.add(a1, simd.shr(a7, two))
+		b1 := simd.add(a1, simd.shr_masked(a7, two))
 		b2 := simd.add(a2, a4)
-		b3 := simd.add(a3, simd.shr(a5, two))
+		b3 := simd.add(a3, simd.shr_masked(a5, two))
 		b4 := simd.sub(a2, a4)
-		b5 := simd.sub(simd.shr(a3, two), a5)
+		b5 := simd.sub(simd.shr_masked(a3, two), a5)
 		b6 := simd.sub(a0, a6)
-		b7 := simd.sub(a7, simd.shr(a1, two))
+		b7 := simd.sub(a7, simd.shr_masked(a1, two))
 		return {
 			simd.add(b0, b7),
 			simd.add(b2, b5),
@@ -567,7 +567,7 @@ idct_8x8_add_lanes :: proc(
 	out := pass(common.transpose(columns)) // column pass: lanes are the columns
 	for y in 0 ..< 8 {
 		pred := (V)(intrinsics.unaligned_load((^#simd[8]T)(&pixels[y * stride])))
-		v := simd.add(pred, simd.shr(simd.add(out[y], 32), (#simd[8]u32)(6)))
+		v := simd.add(pred, simd.shr_masked(simd.add(out[y], 32), (#simd[8]u32)(6)))
 		intrinsics.unaligned_store(
 			(^#simd[8]T)(&pixels[y * stride]),
 			(#simd[8]T)(simd.clamp(v, 0, V(pixel_max))),

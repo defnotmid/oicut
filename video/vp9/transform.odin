@@ -20,9 +20,9 @@ round2 :: #force_inline proc "contextless" (x: i64, n: uint) -> i32 {
 @(private)
 round2_lanes :: #force_inline proc "contextless" (x: $V/#simd[$L]$E, $n: uint) -> V {
 	when E == i32 {
-		return simd.shr(x + V(1 << (n - 1)), (#simd[L]u32)(n))
+		return simd.shr_masked(x + V(1 << (n - 1)), (#simd[L]u32)(n))
 	} else {
-		return simd.shr(x + V(1 << (n - 1)), (#simd[L]u64)(n))
+		return simd.shr_masked(x + V(1 << (n - 1)), (#simd[L]u64)(n))
 	}
 }
 

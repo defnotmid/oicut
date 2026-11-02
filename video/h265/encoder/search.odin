@@ -412,6 +412,11 @@ eval_inter_leaf :: proc(
 			c_r[0][1],
 			wp_luma(enc, 0, r),
 		)
+		if k, ok := best_merge_k.?; ok {
+			if uniq_mv[k].ref_idx[0] == i8(r) && uniq_mv[k].mv[0] == mv_r {
+				continue
+			}
+		}
 		sse_r := mc_luma_sse(
 			enc,
 			&enc.refs[0][r],
@@ -440,6 +445,7 @@ eval_inter_leaf :: proc(
 	if enc.refs_active[0] > 1 && top[1].sse < max(u64) do n_try = 2
 	for t in 0 ..< n_try {
 		s := top[t]
+		if s.sse == max(u64) do continue
 		amvp_run := true
 		if b, ok := best.?; ok {
 			// The coded residual can only lower the prediction SSE, but the
@@ -961,6 +967,7 @@ decide_cu :: proc($RQT: bool, enc: ^Encoder, x, y: int, depth: u8, trial: ^Cabac
 	best_cost := max(f64)
 	best_in_place := false
 
+	skip_intra := false
 	// Inter runs first: a skip good enough to commit stops the node before the
 	// intra mode search and the split recursion.
 	if enc.slice_type != .I && !enc.config.intra_only {
@@ -971,18 +978,30 @@ decide_cu :: proc($RQT: bool, enc: ^Encoder, x, y: int, depth: u8, trial: ^Cabac
 		if r.cost < best_cost {
 			best_cost = r.cost
 			best_in_place = true
+			c := cu_at(enc.cu, x, y)
+			if !RQT &&
+			   !enc.config.rqt &&
+			   !enc.config.intra_rqt &&
+			   enc.config.forced_mode < 0 &&
+			   !c.cbf_y &&
+			   !c.cbf_u &&
+			   !c.cbf_v {
+				skip_intra = true
+			}
 		}
 	}
 
-	if best_in_place {
-		save_node(enc, x, y, depth, &best_state)
-		best_in_place = false
-	}
-	restore_trial(enc, pre_trial)
-	cost := eval_intra_leaf(RQT, enc, x, y, depth, trial, best_cost)
-	if cost < best_cost {
-		best_cost = cost
-		best_in_place = true
+	if !skip_intra {
+		if best_in_place {
+			save_node(enc, x, y, depth, &best_state)
+			best_in_place = false
+		}
+		restore_trial(enc, pre_trial)
+		cost := eval_intra_leaf(RQT, enc, x, y, depth, trial, best_cost)
+		if cost < best_cost {
+			best_cost = cost
+			best_in_place = true
+		}
 	}
 
 	// PCM can only win when the raw samples cost less than the best candidate;
@@ -998,20 +1017,35 @@ decide_cu :: proc($RQT: bool, enc: ^Encoder, x, y: int, depth: u8, trial: ^Cabac
 			best_in_place = false
 		}
 		restore_trial(enc, pre_trial)
-		cost = eval_intra_pcm(RQT, enc, x, y, depth, trial)
+		cost := eval_intra_pcm(RQT, enc, x, y, depth, trial)
 		if cost < best_cost {
 			best_cost = cost
 			best_in_place = true
 		}
 	}
 
-	if depth < MAX_CU_DEPTH {
+	skip_split := false
+	if best_in_place &&
+	   !RQT &&
+	   !enc.config.rqt &&
+	   !enc.config.intra_rqt &&
+	   enc.config.forced_mode < 0 {
+		c := cu_at(enc.cu, x, y)
+		if !c.cbf_y &&
+		   !c.cbf_u &&
+		   !c.cbf_v &&
+		   best_cost <= f64(size * size) * enc.lambda * 0.5 {
+			skip_split = true
+		}
+	}
+
+	if depth < MAX_CU_DEPTH && !skip_split {
 		if best_in_place {
 			save_node(enc, x, y, depth, &best_state)
 			best_in_place = false
 		}
 		restore_trial(enc, pre_trial)
-		cost = eval_split(RQT, enc, x, y, depth, trial)
+		cost := eval_split(RQT, enc, x, y, depth, trial)
 		if cost < best_cost {
 			best_cost = cost
 			best_in_place = true

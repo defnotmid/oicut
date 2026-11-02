@@ -1096,7 +1096,7 @@ select_inter_prediction :: proc(
 	// the vector-only floor is unlikely to improve enough to pay for more vectors.
 	reference_index := selected_reference
 	partition_cost := motion_lambda * (reference_index_bit_count(state, reference_index) * 2 + 3)
-	if state.config.ultrafast || selected_cost < partition_cost + 16 * motion_lambda do return
+	if state.config.ultrafast || selected_cost < partition_cost + 64 * motion_lambda do return
 	stage_partition_motion(macroblock, 0, 4, 4, i8(reference_index), selected_motion)
 	first_motion, first_cost := search_partition_motion(
 		task,

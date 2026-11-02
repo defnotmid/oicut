@@ -301,7 +301,7 @@ filter_lanes :: proc(plane: []$T, base, stride: int, pair: ^Edge_Pair, bit_depth
 	halves :: #force_inline proc "contextless" (a, b: i32) -> V {
 		return simd.select(simd.lanes_lt(simd.indices(V), V(8)), V(E(a)), V(E(b)))
 	}
-	shr :: #force_inline proc "contextless" (v: V, $n: uint) -> V {return simd.shr(v, M(n))}
+	shr :: #force_inline proc "contextless" (v: V, $n: uint) -> V {return simd.shr_masked(v, M(n))}
 	le :: #force_inline proc "contextless" (a, b: V) -> M {return simd.lanes_le(a, b)}
 	both :: #force_inline proc "contextless" (a, b: M) -> M {return simd.bit_and(a, b)}
 	c :: #force_inline proc "contextless" (v, lo, hi: V) -> V {return simd.clamp(v, lo, hi)}
@@ -372,7 +372,7 @@ wide_filter :: #force_inline proc(e, out: ^Edge_Lanes($V), $log2: uint, lanes: $
 	window: V
 	#unroll for j in -n ..= n do window += s[clamp(-n + j, -(n + 1), n) + 8]
 	#unroll for i in -n ..< n {
-		v := simd.shr(s[i + 8] + window + (1 << (log2 - 1)), M(log2))
+		v := simd.shr_masked(s[i + 8] + window + (1 << (log2 - 1)), M(log2))
 		if i < 0 {
 			out.p[-i - 1] = simd.select(lanes, v, out.p[-i - 1])
 		} else {

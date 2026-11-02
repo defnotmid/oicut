@@ -439,7 +439,7 @@ luma_lines :: proc(
 	// Lanes 0..3 take group 0's value, lanes 4..7 group 1's.
 	per_group :: proc(a, b: $E) -> #simd[EDGE_LINES]E {return {a, a, a, a, b, b, b, b}}
 	mask :: proc(v: [2]bool) -> M {return per_group(v[0] ? max(U) : 0, v[1] ? max(U) : 0)}
-	shr :: proc(v: V, $n: u64) -> V {return simd.shr(v, (#simd[EDGE_LINES]U)(n))}
+	shr :: proc(v: V, $n: u64) -> V {return simd.shr_masked(v, (#simd[EDGE_LINES]U)(n))}
 
 	e := edge_load(T, plane, base, line, step)
 	beta := per_group(T(groups[0].beta), T(groups[1].beta))

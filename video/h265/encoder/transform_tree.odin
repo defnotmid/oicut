@@ -140,24 +140,30 @@ tf_leaf_prepare :: proc(
 	qp_c := chroma_qp_scaled(enc)
 	csize := size / (enc.config.chroma_format == Chroma_Layout.YUV_444 ? 1 : 2)
 
-	for j in 0 ..< size {
-		for i in 0 ..< size {
-			leaf.tmp[j * size + i] = i16(
-				i32(at(enc.source.y, x + i, y + j)) -
-				i32(ctx.pred_y[(y - ctx.cu_y + j) * ctx.cu_size + (x - ctx.cu_x + i)]),
-			)
-		}
-	}
-	forward_transform(enc, size, leaf.tmp[:], size, leaf.coeff[:], enc.bit_depth)
-	leaf.cbf_y = enc_quantize(
-		enc,
-		leaf.coeff[:],
-		leaf.q_y[:],
+	if sub_residual_vec(
+		leaf.tmp[:],
+		enc.source.y,
+		x,
+		y,
+		ctx.pred_y,
+		ctx.cu_size,
+		x - ctx.cu_x,
+		y - ctx.cu_y,
 		size,
-		.Y,
-		false,
-		int(luma_qp_scaled(enc)),
-	)
+	) {
+		forward_transform(enc, size, leaf.tmp[:], size, leaf.coeff[:], enc.bit_depth)
+		leaf.cbf_y = enc_quantize(
+			enc,
+			leaf.coeff[:],
+			leaf.q_y[:],
+			size,
+			.Y,
+			false,
+			int(luma_qp_scaled(enc)),
+		)
+	} else {
+		leaf.cbf_y = false
+	}
 
 	sub_w, sub_h := chroma_sub(enc.config.chroma_format)
 	cx := x / sub_w
@@ -169,45 +175,53 @@ tf_leaf_prepare :: proc(
 	n_chroma := chroma_blocks(enc.config.chroma_format)
 	for t in 0 ..< n_chroma {
 		if depth == 0 || cbf_u_up {
-			for j in 0 ..< csize {
-				for i in 0 ..< csize {
-					leaf.tmp[j * csize + i] = i16(
-						i32(at(enc.source.u, cx + i, cy + t * csize + j)) -
-						i32(ctx.pred_u[(oy + t * csize + j) * cw + ox + i]),
-					)
-				}
-			}
-			forward_transform(enc, csize, leaf.tmp[:], csize, leaf.coeff[:], enc.bit_depth)
-			leaf.cbf_u[t] = enc_quantize(
-				enc,
-				leaf.coeff[:],
-				leaf.q_u[t][:],
+			if sub_residual_vec(
+				leaf.tmp[:],
+				enc.source.u,
+				cx,
+				cy + t * csize,
+				ctx.pred_u,
+				cw,
+				ox,
+				oy + t * csize,
 				csize,
-				.Cb,
-				false,
-				int(qp_c),
-			)
+			) {
+				forward_transform(enc, csize, leaf.tmp[:], csize, leaf.coeff[:], enc.bit_depth)
+				leaf.cbf_u[t] = enc_quantize(
+					enc,
+					leaf.coeff[:],
+					leaf.q_u[t][:],
+					csize,
+					.Cb,
+					false,
+					int(qp_c),
+				)
+			}
 		}
 
 		if depth == 0 || cbf_v_up {
-			for j in 0 ..< csize {
-				for i in 0 ..< csize {
-					leaf.tmp[j * csize + i] = i16(
-						i32(at(enc.source.v, cx + i, cy + t * csize + j)) -
-						i32(ctx.pred_v[(oy + t * csize + j) * cw + ox + i]),
-					)
-				}
-			}
-			forward_transform(enc, csize, leaf.tmp[:], csize, leaf.coeff[:], enc.bit_depth)
-			leaf.cbf_v[t] = enc_quantize(
-				enc,
-				leaf.coeff[:],
-				leaf.q_v[t][:],
+			if sub_residual_vec(
+				leaf.tmp[:],
+				enc.source.v,
+				cx,
+				cy + t * csize,
+				ctx.pred_v,
+				cw,
+				ox,
+				oy + t * csize,
 				csize,
-				.Cr,
-				false,
-				int(qp_c),
-			)
+			) {
+				forward_transform(enc, csize, leaf.tmp[:], csize, leaf.coeff[:], enc.bit_depth)
+				leaf.cbf_v[t] = enc_quantize(
+					enc,
+					leaf.coeff[:],
+					leaf.q_v[t][:],
+					csize,
+					.Cr,
+					false,
+					int(qp_c),
+				)
+			}
 		}
 	}
 }

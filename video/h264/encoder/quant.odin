@@ -182,7 +182,7 @@ quantize_4x4_prepared :: #force_inline proc(
 	Coefficients :: #simd[16]i32
 	raster := intrinsics.unaligned_load((^Coefficients)(coefficients))
 	scan := simd.swizzle(raster, 0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15)
-	magnitudes := simd.shr(
+	magnitudes := simd.shr_masked(
 		simd.add(simd.mul(simd.abs(scan), q.multipliers), Coefficients(q.deadzone)),
 		(#simd[16]u32)(q.shift),
 	)
@@ -249,20 +249,20 @@ forward_transform_eight_vectors :: #force_inline proc(
 
 	b0, b2 := simd.add(a0, a3), simd.sub(a0, a3)
 	b1, b3 := simd.add(a1, a2), simd.sub(a1, a2)
-	b4 := simd.add(simd.add(a5, a6), simd.add(a4, simd.shr(a4, one)))
-	b5 := simd.sub(simd.sub(a4, a7), simd.add(a6, simd.shr(a6, one)))
-	b6 := simd.sub(simd.add(a4, a7), simd.add(a5, simd.shr(a5, one)))
-	b7 := simd.add(simd.sub(a5, a6), simd.add(a7, simd.shr(a7, one)))
+	b4 := simd.add(simd.add(a5, a6), simd.add(a4, simd.shr_masked(a4, one)))
+	b5 := simd.sub(simd.sub(a4, a7), simd.add(a6, simd.shr_masked(a6, one)))
+	b6 := simd.sub(simd.add(a4, a7), simd.add(a5, simd.shr_masked(a5, one)))
+	b7 := simd.add(simd.sub(a5, a6), simd.add(a7, simd.shr_masked(a7, one)))
 
 	return {
 		simd.add(b0, b1),
-		simd.add(b4, simd.shr(b7, two)),
-		simd.add(b2, simd.shr(b3, one)),
-		simd.add(b5, simd.shr(b6, two)),
+		simd.add(b4, simd.shr_masked(b7, two)),
+		simd.add(b2, simd.shr_masked(b3, one)),
+		simd.add(b5, simd.shr_masked(b6, two)),
 		simd.sub(b0, b1),
-		simd.sub(b6, simd.shr(b5, two)),
-		simd.sub(simd.shr(b2, one), b3),
-		simd.sub(simd.shr(b4, two), b7),
+		simd.sub(b6, simd.shr_masked(b5, two)),
+		simd.sub(simd.shr_masked(b2, one), b3),
+		simd.sub(simd.shr_masked(b4, two), b7),
 	}
 }
 
@@ -428,7 +428,7 @@ quantize_8x8_prepared :: #force_inline proc(
 		62,
 		63,
 	)
-	magnitudes := simd.shr(
+	magnitudes := simd.shr_masked(
 		simd.add(simd.mul(simd.abs(scan), q.multipliers), Coefficients(q.deadzone)),
 		(#simd[64]u32)(q.shift),
 	)

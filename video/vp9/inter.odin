@@ -171,7 +171,7 @@ filter_pass :: proc(dst: [^]$D, dst_stride: int, src: [^]$S, src_stride, step, w
 		at := r * src_stride + c
 		acc := round
 		#unroll for t in 0 ..< 8 do acc += kv[t] * V(intrinsics.unaligned_load((^#simd[N]S)(&src[at + t * step])))
-		v := simd.clamp(simd.shr(acc, shift), zero, hi)
+		v := simd.clamp(simd.shr_masked(acc, shift), zero, hi)
 		intrinsics.unaligned_store((^#simd[N]D)(&dst[r * dst_stride + c]), (#simd[N]D)(v))
 	}
 }
@@ -186,7 +186,7 @@ average_into :: proc(dst: []$T, dst_stride: int, other: []T, other_stride, w, h:
 		for c := 0; c < w; c += 4 {
 			av := W(intrinsics.unaligned_load((^#simd[4]T)(&a[c])))
 			bv := W(intrinsics.unaligned_load((^#simd[4]T)(&b[c])))
-			res := (#simd[4]T)(simd.shr(av + bv + W(1), W(1)))
+			res := (#simd[4]T)(simd.shr_masked(av + bv + W(1), W(1)))
 			intrinsics.unaligned_store((^#simd[4]T)(&a[c]), res)
 		}
 	}

@@ -22,4 +22,6 @@ transpose_swaps_rows_and_columns :: proc(t: ^testing.T) {
 	check(t, 8, i16)
 	check(t, 8, i32)
 	check(t, 8, i64)
+	check(t, 16, i16)
+	check(t, 16, i32)
 }

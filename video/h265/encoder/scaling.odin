@@ -62,10 +62,35 @@ enc_quantize :: proc(
 	kind: Sl_Kind,
 	intra: bool,
 	qp_scaled: int,
-) -> bool {
-	if !enc.scaling_on do return quantize(coeff, qcoeff, size, enc.bit_depth, qp_scaled, intra)
-	m, dc := scaling_matrix(enc, size, kind, intra)
-	return hevc.quantize_scaled(coeff, qcoeff, size, enc.bit_depth, qp_scaled, intra, m, dc)
+) -> bool #no_bounds_check {
+	cbf: bool
+	if !enc.scaling_on {
+		cbf = quantize(coeff, qcoeff, size, enc.bit_depth, qp_scaled, intra)
+	} else {
+		m, dc := scaling_matrix(enc, size, kind, intra)
+		cbf = hevc.quantize_scaled(coeff, qcoeff, size, enc.bit_depth, qp_scaled, intra, m, dc)
+	}
+	if cbf && !intra && size >= 8 && qp_scaled >= 12 {
+		nz_count := 0
+		nz_idx := 0
+		for i in 0 ..< size * size {
+			v := qcoeff[i]
+			if v != 0 {
+				if v != 1 && v != -1 {
+					nz_count = 2
+					break
+				}
+				nz_count += 1
+				if nz_count > 1 do break
+				nz_idx = i
+			}
+		}
+		if nz_count == 1 && (nz_idx / size >= 2 || nz_idx % size >= 2) {
+			qcoeff[nz_idx] = 0
+			return false
+		}
+	}
+	return cbf
 }
 
 enc_dequantize :: proc(

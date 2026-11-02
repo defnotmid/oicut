@@ -69,7 +69,7 @@ sao_chunk :: #force_inline proc "contextless" (
 	// Each sample's key selects one of the four offsets, or none.
 	when BAND {
 		// The band relative to the first of the four offset bands.
-		key := simd.bit_and(simd.shr(v, (#simd[N]u16)(u16(shift))) - V(i16(p.band)), V(31))
+		key := simd.bit_and(simd.shr_masked(v, (#simd[N]u16)(u16(shift))) - V(i16(p.band)), V(31))
 		keys := [4]i16{0, 1, 2, 3}
 	} else {
 		// Table 8-13: the sum of the signs against both neighbours; local
@@ -133,7 +133,7 @@ weigh_lanes :: #force_inline proc "contextless" (
 	for ; x + N <= w; x += N {
 		v := (V)(intrinsics.unaligned_load((^#simd[N]i16)(&a[x]))) * V(pw.w0)
 		when BI do v += (V)(intrinsics.unaligned_load((^#simd[N]i16)(&b[x]))) * V(pw.w1)
-		v = simd.shr(v + V(pw.round), (#simd[N]u32)(pw.shift)) + V(pw.offset)
+		v = simd.shr_masked(v + V(pw.round), (#simd[N]u32)(pw.shift)) + V(pw.offset)
 		intrinsics.unaligned_store(
 			(^#simd[N]Sample)(&d[x]),
 			(#simd[N]Sample)(simd.clamp(v, V(0), V(max_v))),

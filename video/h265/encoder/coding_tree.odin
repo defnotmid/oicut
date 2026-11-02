@@ -839,15 +839,10 @@ write_inter_leaf :: proc(
 			wp_luma(enc, 0, ref),
 			enc.bit_depth,
 		)
-		for j in 0 ..< size {
-			for i in 0 ..< size {
-				res_y[j * size + i] = i16(
-					i32(at(enc.source.y, x + i, y + j)) - i32(pred_y[j * size + i]),
-				)
-			}
+		if sub_residual_vec(res_y[:], enc.source.y, x, y, pred_y[:], size, 0, 0, size) {
+			forward_transform(enc, size, res_y[:], size, coeff[:], enc.bit_depth)
+			cbf_y = enc_quantize(enc, coeff[:], q_y[:], size, .Y, false, int(luma_qp_scaled(enc)))
 		}
-		forward_transform(enc, size, res_y[:], size, coeff[:], enc.bit_depth)
-		cbf_y = enc_quantize(enc, coeff[:], q_y[:], size, .Y, false, int(luma_qp_scaled(enc)))
 	}
 
 	cbf_u, cbf_v: [2]bool
@@ -871,16 +866,20 @@ write_inter_leaf :: proc(
 					wp_chroma(enc, 0, ref, 0),
 					enc.bit_depth,
 				)
-				for j in 0 ..< csize {
-					for i in 0 ..< csize {
-						res_c[j * csize + i] = i16(
-							i32(at(enc.source.u, x / sub_w + i, cy + j)) -
-							i32(pred_u[blk + j * csize + i]),
-						)
-					}
+				if sub_residual_vec(
+					res_c[:],
+					enc.source.u,
+					x / sub_w,
+					cy,
+					pred_u[blk:],
+					csize,
+					0,
+					0,
+					csize,
+				) {
+					forward_transform(enc, csize, res_c[:], csize, coeff[:], enc.bit_depth)
+					cbf_u[t] = enc_quantize(enc, coeff[:], q_u[t][:], csize, .Cb, false, int(qp_c))
 				}
-				forward_transform(enc, csize, res_c[:], csize, coeff[:], enc.bit_depth)
-				cbf_u[t] = enc_quantize(enc, coeff[:], q_u[t][:], csize, .Cb, false, int(qp_c))
 			}
 
 			if search || cu.cbf_v {
@@ -898,16 +897,20 @@ write_inter_leaf :: proc(
 					wp_chroma(enc, 0, ref, 1),
 					enc.bit_depth,
 				)
-				for j in 0 ..< csize {
-					for i in 0 ..< csize {
-						res_c[j * csize + i] = i16(
-							i32(at(enc.source.v, x / sub_w + i, cy + j)) -
-							i32(pred_v[blk + j * csize + i]),
-						)
-					}
+				if sub_residual_vec(
+					res_c[:],
+					enc.source.v,
+					x / sub_w,
+					cy,
+					pred_v[blk:],
+					csize,
+					0,
+					0,
+					csize,
+				) {
+					forward_transform(enc, csize, res_c[:], csize, coeff[:], enc.bit_depth)
+					cbf_v[t] = enc_quantize(enc, coeff[:], q_v[t][:], csize, .Cr, false, int(qp_c))
 				}
-				forward_transform(enc, csize, res_c[:], csize, coeff[:], enc.bit_depth)
-				cbf_v[t] = enc_quantize(enc, coeff[:], q_v[t][:], csize, .Cr, false, int(qp_c))
 			}
 		}
 	}
@@ -1224,42 +1227,26 @@ write_inter_leaf_b :: proc(
 
 	inter_predict_b(enc, x, y, size, cu.pred, cu.mv, cu.ref_idx, pred_y[:], pred_u[:], pred_v[:])
 
-	for j in 0 ..< size {
-		for i in 0 ..< size {
-			res_y[j * size + i] = i16(
-				i32(at(enc.source.y, x + i, y + j)) - i32(pred_y[j * size + i]),
-			)
-		}
+	cbf_y: bool
+	if sub_residual_vec(res_y[:], enc.source.y, x, y, pred_y[:], size, 0, 0, size) {
+		forward_transform(enc, size, res_y[:], size, coeff[:], enc.bit_depth)
+		cbf_y = enc_quantize(enc, coeff[:], q_y[:], size, .Y, false, int(luma_qp_scaled(enc)))
 	}
-	forward_transform(enc, size, res_y[:], size, coeff[:], enc.bit_depth)
-	cbf_y := enc_quantize(enc, coeff[:], q_y[:], size, .Y, false, int(luma_qp_scaled(enc)))
 
 	cbf_u, cbf_v: [2]bool
 	n_chroma := chroma_blocks(enc.config.chroma_format)
 	for t in 0 ..< n_chroma {
 		cy := y / sub_h + t * csize
 		blk := t * csize * csize
-		for j in 0 ..< csize {
-			for i in 0 ..< csize {
-				res_c[j * csize + i] = i16(
-					i32(at(enc.source.u, x / sub_w + i, cy + j)) -
-					i32(pred_u[blk + j * csize + i]),
-				)
-			}
+		if sub_residual_vec(res_c[:], enc.source.u, x / sub_w, cy, pred_u[blk:], csize, 0, 0, csize) {
+			forward_transform(enc, csize, res_c[:], csize, coeff[:], enc.bit_depth)
+			cbf_u[t] = enc_quantize(enc, coeff[:], q_u[t][:], csize, .Cb, false, int(qp_c))
 		}
-		forward_transform(enc, csize, res_c[:], csize, coeff[:], enc.bit_depth)
-		cbf_u[t] = enc_quantize(enc, coeff[:], q_u[t][:], csize, .Cb, false, int(qp_c))
 
-		for j in 0 ..< csize {
-			for i in 0 ..< csize {
-				res_c[j * csize + i] = i16(
-					i32(at(enc.source.v, x / sub_w + i, cy + j)) -
-					i32(pred_v[blk + j * csize + i]),
-				)
-			}
+		if sub_residual_vec(res_c[:], enc.source.v, x / sub_w, cy, pred_v[blk:], csize, 0, 0, csize) {
+			forward_transform(enc, csize, res_c[:], csize, coeff[:], enc.bit_depth)
+			cbf_v[t] = enc_quantize(enc, coeff[:], q_v[t][:], csize, .Cr, false, int(qp_c))
 		}
-		forward_transform(enc, csize, res_c[:], csize, coeff[:], enc.bit_depth)
-		cbf_v[t] = enc_quantize(enc, coeff[:], q_v[t][:], csize, .Cr, false, int(qp_c))
 	}
 
 	// --- Root coded block flag and transform tree -------------------------
@@ -1536,7 +1523,7 @@ write_intra_leaf :: #force_inline proc(
 	res_y: [32 * 32]i16 = ---
 	coeff_y: [32 * 32]i16 = ---
 	pred_y: [32 * 32]Sample = ---
-	refs: Intra_Refs
+	refs: Intra_Refs = ---
 
 	cbf_y: bool
 	if search || cu.cbf_y {
@@ -1546,24 +1533,19 @@ write_intra_leaf :: #force_inline proc(
 			luma_refs = &refs
 		}
 		intra_predict(luma_refs, log2_size(size), mode, .Y, pred_y[:], size, enc.bit_depth)
-		for j in 0 ..< size {
-			for i in 0 ..< size {
-				res_y[j * size + i] = i16(
-					i32(at(enc.source.y, x + i, y + j)) - i32(pred_y[j * size + i]),
-				)
-			}
+		if sub_residual_vec(res_y[:], enc.source.y, x, y, pred_y[:], size, 0, 0, size) {
+			forward_transform(enc, size, res_y[:], size, coeff_y[:], enc.bit_depth)
+			cbf_y = enc_quantize(enc, coeff_y[:], q_y[:], size, .Y, true, int(luma_qp_scaled(enc)))
 		}
-		forward_transform(enc, size, res_y[:], size, coeff_y[:], enc.bit_depth)
-		cbf_y = enc_quantize(enc, coeff_y[:], q_y[:], size, .Y, true, int(luma_qp_scaled(enc)))
 	}
 
 	// --- Chroma ------------------------------------------------------------
 	csize := has_chroma(enc) ? size / sub_w : 0
 	qp_c := chroma_qp_scaled(enc)
 	sse_chroma: u64
-	// The stacked-chroma save below copies each entire coefficient array.
-	q_u: [2][32 * 32]i16
-	q_v: [2][32 * 32]i16
+	// The stacked-chroma save below copies only the active csize*csize slice.
+	q_u: [2][32 * 32]i16 = ---
+	q_v: [2][32 * 32]i16 = ---
 	res_c: [32 * 32]i16 = ---
 	coeff_c: [32 * 32]i16 = ---
 	pred_u: [2 * 32 * 32]Sample = ---
@@ -1589,16 +1571,10 @@ write_intra_leaf :: #force_inline proc(
 					enc.bit_depth,
 					enc.config.chroma_format,
 				)
-				for j in 0 ..< csize {
-					for i in 0 ..< csize {
-						res_c[j * csize + i] = i16(
-							i32(at(enc.source.u, x / sub_w + i, ty / sub_h + j)) -
-							i32(pred_u[j * csize + i]),
-						)
-					}
+				if sub_residual_vec(res_c[:], enc.source.u, x / sub_w, ty / sub_h, pred_u[:], csize, 0, 0, csize) {
+					forward_transform(enc, csize, res_c[:], csize, coeff_c[:], enc.bit_depth)
+					cbf_u[t] = enc_quantize(enc, coeff_c[:], q_u[t][:], csize, .Cb, true, int(qp_c))
 				}
-				forward_transform(enc, csize, res_c[:], csize, coeff_c[:], enc.bit_depth)
-				cbf_u[t] = enc_quantize(enc, coeff_c[:], q_u[t][:], csize, .Cb, true, int(qp_c))
 				if search && n_chroma > 1 {
 					// 4:2:2: the second stacked block predicts from the
 					// first's reconstruction (8.4.2), so each block
@@ -1608,7 +1584,8 @@ write_intra_leaf :: #force_inline proc(
 					// transform writes its spatial result back into the
 					// coefficient buffer, so the quantized levels are held
 					// across it — the coefficient writes come later.
-					saved_u := q_u[t]
+					saved_u: [32 * 32]i16 = ---
+					if cbf_u[t] do copy(saved_u[:csize * csize], q_u[t][:csize * csize])
 					recon_plane(
 						enc,
 						enc.rec.u,
@@ -1625,7 +1602,7 @@ write_intra_leaf :: #force_inline proc(
 						qp_c,
 						&sse_chroma,
 					)
-					q_u[t] = saved_u
+					if cbf_u[t] do copy(q_u[t][:csize * csize], saved_u[:csize * csize])
 				}
 			}
 
@@ -1641,18 +1618,13 @@ write_intra_leaf :: #force_inline proc(
 					enc.bit_depth,
 					enc.config.chroma_format,
 				)
-				for j in 0 ..< csize {
-					for i in 0 ..< csize {
-						res_c[j * csize + i] = i16(
-							i32(at(enc.source.v, x / sub_w + i, ty / sub_h + j)) -
-							i32(pred_v[j * csize + i]),
-						)
-					}
+				if sub_residual_vec(res_c[:], enc.source.v, x / sub_w, ty / sub_h, pred_v[:], csize, 0, 0, csize) {
+					forward_transform(enc, csize, res_c[:], csize, coeff_c[:], enc.bit_depth)
+					cbf_v[t] = enc_quantize(enc, coeff_c[:], q_v[t][:], csize, .Cr, true, int(qp_c))
 				}
-				forward_transform(enc, csize, res_c[:], csize, coeff_c[:], enc.bit_depth)
-				cbf_v[t] = enc_quantize(enc, coeff_c[:], q_v[t][:], csize, .Cr, true, int(qp_c))
 				if search && n_chroma > 1 {
-					saved_v := q_v[t]
+					saved_v: [32 * 32]i16 = ---
+					if cbf_v[t] do copy(saved_v[:csize * csize], q_v[t][:csize * csize])
 					recon_plane(
 						enc,
 						enc.rec.v,
@@ -1669,7 +1641,7 @@ write_intra_leaf :: #force_inline proc(
 						qp_c,
 						&sse_chroma,
 					)
-					q_v[t] = saved_v
+					if cbf_v[t] do copy(q_v[t][:csize * csize], saved_v[:csize * csize])
 				}
 			}
 		}

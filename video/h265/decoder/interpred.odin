@@ -239,6 +239,6 @@ mc_chunk :: #force_inline proc "contextless" (
 	when TAPS > 1 {
 		#unroll for k in 1 ..< TAPS do acc = simd.add(acc, simd.mul(load(&s[k * step]), (V)(t[k])))
 	}
-	acc = simd.shr(acc, (#simd[N]intrinsics.type_integer_to_unsigned(T))(shift))
+	acc = simd.shr_masked(acc, (#simd[N]intrinsics.type_integer_to_unsigned(T))(shift))
 	intrinsics.unaligned_store((^#simd[N]i16)(d), (#simd[N]i16)(acc))
 }

@@ -279,7 +279,7 @@ mc_luma_lanes :: proc(
 			simd.mul(simd.add(rows[y + 2], rows[y + 3]), 20),
 		)
 		return (#simd[Lane_Count]E)(
-			simd.clamp(simd.shr(simd.add(v, 512), (#simd[Lane_Count]u32)(10)), 0, (#simd[Lane_Count]i32)(pixel_max)),
+			simd.clamp(simd.shr_masked(simd.add(v, 512), (#simd[Lane_Count]u32)(10)), 0, (#simd[Lane_Count]i32)(pixel_max)),
 		)
 	}
 	put :: #force_inline proc(dst: [^]$T, dst_stride, y: int, out: #simd[$N]$E) {

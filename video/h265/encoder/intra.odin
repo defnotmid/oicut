@@ -273,7 +273,7 @@ angular_pred :: #force_inline proc(
 			values := intra_load_samples(LANES, ref_main, ref_main_off + x + delta_int)
 			if delta_fract != 0 {
 				next := intra_load_samples(LANES, ref_main, ref_main_off + x + delta_int + 1)
-				values = simd.shr(
+				values = simd.shr_masked(
 					simd.add(
 						simd.add(
 							simd.mul(V(32 - delta_fract), values),
@@ -341,9 +341,7 @@ pred_planar :: #force_inline proc(
 	}
 	V :: #simd[LANES]i32
 	when LANES > 1 {
-		offsets: [LANES]i32 = ---
-		for &offset, lane in offsets do offset = i32(lane + 1)
-		lane_offsets := intrinsics.unaligned_load((^V)(&offsets[0]))
+		lane_offsets := simd.iota(V) + V(1)
 	}
 	for y in 0 ..< width {
 		left := i32(ref_left[y + 1])
@@ -366,7 +364,7 @@ pred_planar :: #force_inline proc(
 					simd.mul(V(i32(top_right) - left), simd.add(V(i32(x)), lane_offsets)),
 				)
 			}
-			values := simd.shr(simd.add(hor_v, top_v), (#simd[LANES]u32)(u32(log2_width + 1)))
+			values := simd.shr_masked(simd.add(hor_v, top_v), (#simd[LANES]u32)(u32(log2_width + 1)))
 			intra_consume(
 				Publish,
 				Measure,
@@ -407,7 +405,7 @@ pred_dc :: #force_inline proc(
 			values := V(dc_val)
 			if filtered {
 				if y == 0 {
-					values = simd.shr(
+					values = simd.shr_masked(
 						simd.add(intra_load_samples(LANES, ref_top, x + 1), V(3 * dc_val + 2)),
 						(#simd[LANES]u32)(2),
 					)

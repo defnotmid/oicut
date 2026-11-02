@@ -151,22 +151,59 @@ motion_estimate :: proc(
 			}
 		}
 	} else {
-		cost = max(u32)
-		search: for dy := -range; dy <= range; dy += 1 {
-			for dx := -range; dx <= range; dx += 1 {
-				s := sad_int_luma(enc, ref, x, y, w, h, int(ix + dx), int(iy + dy))
+		cost = sad_int_luma(enc, ref, x, y, w, h, int(bx), int(by))
+		if (ix != 0 || iy != 0) && cost > 0 {
+			s0 := sad_int_luma(enc, ref, x, y, w, h, 0, 0)
+			if s0 < cost {
+				cost = s0
+				bx, by = 0, 0
+			}
+		}
+		min_x, max_x := ix - range, ix + range
+		min_y, max_y := iy - range, iy + range
+		for cost > 0 {
+			cx, cy := bx, by
+			for offset in ([4][2]i32{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}) {
+				nx, ny := cx + offset[0], cy + offset[1]
+				if nx < min_x || nx > max_x || ny < min_y || ny > max_y do continue
+				s := sad_int_luma(enc, ref, x, y, w, h, int(nx), int(ny))
 				if s < cost {
 					cost = s
-					bx, by = ix + dx, iy + dy
-					if s == 0 do break search
+					bx, by = nx, ny
 				}
+			}
+			if bx == cx && by == cy do break
+		}
+		if cost > u32(w * h) {
+			grid: for dy := -range; dy <= range; dy += 2 {
+				for dx := -range; dx <= range; dx += 2 {
+					s := sad_int_luma(enc, ref, x, y, w, h, int(ix + dx), int(iy + dy))
+					if s < cost {
+						cost = s
+						bx, by = ix + dx, iy + dy
+						if s == 0 do break grid
+					}
+				}
+			}
+			for cost > 0 {
+				cx, cy := bx, by
+				for offset in ([8][2]i32{{-1, 0}, {1, 0}, {0, -1}, {0, 1}, {-1, -1}, {1, -1}, {-1, 1}, {1, 1}}) {
+					nx, ny := cx + offset[0], cy + offset[1]
+					if nx < min_x || nx > max_x || ny < min_y || ny > max_y do continue
+					s := sad_int_luma(enc, ref, x, y, w, h, int(nx), int(ny))
+					if s < cost {
+						cost = s
+						bx, by = nx, ny
+					}
+				}
+				if bx == cx && by == cy do break
 			}
 		}
 	}
 	best = {i16(clamp(bx * 4, -2048, 2047)), i16(clamp(by * 4, -2048, 2047))}
 	integer_exact := cost == 0
-	// Half-pel (d = 2) then quarter-pel (d = 1) refinement: the 3x3
-	// neighbourhood minus the centre, whose cost is already known.
+	// Half-pel (d = 2) then quarter-pel (d = 1) refinement: cardinal diamond
+	// first, then only the two diagonals flanking a winning cardinal step.
 	if !integer_exact {
 		cache: Luma_Search_Interpolation = ---
 		cache.ready = {}
@@ -177,9 +214,42 @@ motion_estimate :: proc(
 		for step in 1 ..= max_step {
 			base := best
 			d := i16(step == 1 ? 2 : 1)
-			for oy := i32(-1); oy <= 1; oy += 1 {
-				for ox := i32(-1); ox <= 1; ox += 1 {
-					if ox == 0 && oy == 0 do continue
+			best_ox, best_oy: i32
+			for offset in ([4][2]i32{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}) {
+				ox, oy := offset[0], offset[1]
+				mvx := base[0] + i16(ox) * d
+				mvy := base[1] + i16(oy) * d
+				s: u32
+				if use_cache {
+					src := enc.source.y
+					s = mc_luma_search(
+						true,
+						&cache,
+						nil,
+						ref,
+						x,
+						y,
+						w,
+						h,
+						mvx,
+						mvy,
+						enc.bit_depth,
+						src.data[src.offset + y * src.stride + x:],
+						src.stride,
+					)
+				} else {
+					s = sad_mc_luma(enc, ref, x, y, w, h, mvx, mvy, wp)
+				}
+				if s < cost {
+					cost = s
+					best = {mvx, mvy}
+					best_ox, best_oy = ox, oy
+				}
+			}
+			if best_ox != 0 || best_oy != 0 {
+				diags := best_ox != 0 ? [2][2]i32{{best_ox, -1}, {best_ox, 1}} : [2][2]i32{{-1, best_oy}, {1, best_oy}}
+				for offset in diags {
+					ox, oy := offset[0], offset[1]
 					mvx := base[0] + i16(ox) * d
 					mvy := base[1] + i16(oy) * d
 					s: u32
@@ -208,6 +278,8 @@ motion_estimate :: proc(
 						best = {mvx, mvy}
 					}
 				}
+			} else if step == 1 && cost <= u32(w * h) {
+				break
 			}
 		}
 	}

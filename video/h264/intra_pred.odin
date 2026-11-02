@@ -290,7 +290,7 @@ plane_rows :: #force_inline proc(
 	for x in 0 ..< N do xs[x] = i32(x) - i32(N / 2 - 1)
 	base := simd.add(simd.mul((W)(b), transmute(W)xs), (W)(a + 16))
 	for y in 0 ..< rows {
-		v := simd.shr(simd.add(base, (W)(c * (i32(y) - i32(rows / 2 - 1)))), (#simd[N]u32)(5))
+		v := simd.shr_masked(simd.add(base, (W)(c * (i32(y) - i32(rows / 2 - 1)))), (#simd[N]u32)(5))
 		intrinsics.unaligned_store((^#simd[N]T)(&dst[y * stride]), (#simd[N]T)(simd.clamp(v, 0, W(pixel_max))))
 	}
 }
