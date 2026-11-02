@@ -130,10 +130,10 @@ vp9_constants :: proc(lines: []string) -> map[string]i64 {
 	return constants
 }
 
-// A spec expression: numbers, constants, + - * and parentheses.
+// A spec expression: numbers, constants, << >> + - * and parentheses.
 spec_value :: proc(text: string, constants: map[string]i64) -> i64 {
 	for c in transmute([]u8)text {
-		if !(is_digit(c) || (c >= 'A' && c <= 'Z') || strings.index_byte("_+-* ()\n", c) >= 0) do fail("bad expression %q", text)
+		if !(is_digit(c) || (c >= 'A' && c <= 'Z') || strings.index_byte("_+-*<> ()\n", c) >= 0) do fail("bad expression %q", text)
 	}
 	return evaluate(text, constants)
 }

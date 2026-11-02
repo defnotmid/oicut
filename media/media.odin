@@ -12,7 +12,7 @@ Codec :: enum {
 	VP9,    // a frame or superframe per packet, alpha in Packet.alpha; native encode is profile 0 (8-bit 4:2:0)
 	FLAC,   // decode only; one frame per packet (Framing.Frame), streaminfo in Config.extradata
 	MP3,    // decode only; MPEG-1/2/2.5 Layer III, one frame per packet (Framing.Frame)
-	AV1,    // decode only, Vulkan Video; one temporal unit per packet (Framing.Frame), Main 4:2:0 8/10-bit
+	AV1,    // one temporal unit per packet (Framing.Frame); native supports Profiles 0-2, Vulkan Video decodes Main 4:2:0 8/10-bit
 	Opus,   // decode only, 48 kHz; one packet per Packet (Framing.Frame), OpusHead in Config.extradata; channels in the Opus mapping order
 	ALAC,   // decode only; one packet per Packet (Framing.Frame), 24-byte ALACSpecificConfig in Config.extradata
 	Vorbis, // decode only; one packet per Packet (Framing.Frame), the three headers Xiph-laced in Config.extradata (Matroska's CodecPrivate)
@@ -263,7 +263,6 @@ validate_config :: proc(config: Config) -> Error {
 	if depth != 8 && depth != 10 && depth != 12 do return .Unsupported
 	if config.width < 0 || config.height < 0 || config.gop_size < 0 || config.profile_idc < 0 do return .Invalid_Config
 	if config.frame_rate_num < 0 || config.frame_rate_den < 0 || (config.frame_rate_num == 0) != (config.frame_rate_den == 0) do return .Invalid_Config
-	if config.codec == .AV1 && config.operation == .Encode do return .Unsupported
 	if config.alpha && config.operation != .Encode do return .Invalid_Config
 	if config.alpha && config.codec != .H265 && config.codec != .VP9 do return .Unsupported
 	if config.alpha_premultiplied && config.codec == .VP9 do return .Invalid_Config

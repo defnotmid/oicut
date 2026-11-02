@@ -28,6 +28,7 @@ GENERATORS := [?]Generator {
 	{"mp3", mp3_tables, "third_party", "audio/mp3/tables.odin"},
 	{"h265", h265_tables, "third_party", "video/h265/scan_tables.odin"},
 	{"vp9", vp9_tables, "", "video/vp9/tables.odin"},
+	{"av1", av1_tables, "", "video/av1/tables.odin"},
 }
 
 main :: proc() {
@@ -215,6 +216,21 @@ evaluate :: proc(text: string, names: map[string]i64) -> i64 {
 		p.i = skip_space(p.s, p.i)
 		return p.i < len(p.s) ? p.s[p.i] : 0
 	}
+	shift :: proc(p: ^Parser) -> i64 {
+		value := sum(p)
+		for {
+			p.i = skip_space(p.s, p.i)
+			if strings.has_prefix(p.s[p.i:], "<<") {
+				p.i += 2
+				value <<= uint(sum(p))
+			} else if strings.has_prefix(p.s[p.i:], ">>") {
+				p.i += 2
+				value >>= uint(sum(p))
+			} else {
+				return value
+			}
+		}
+	}
 	sum :: proc(p: ^Parser) -> i64 {
 		value := product(p)
 		for {
@@ -245,7 +261,7 @@ evaluate :: proc(text: string, names: map[string]i64) -> i64 {
 		case '+': p.i += 1; return unary(p)
 		case '(':
 			p.i += 1
-			value := sum(p)
+			value := shift(p)
 			if peek(p) != ')' do fail("unbalanced parentheses in %q", p.s)
 			p.i += 1
 			return value
@@ -262,7 +278,7 @@ evaluate :: proc(text: string, names: map[string]i64) -> i64 {
 		return value
 	}
 	p := Parser{text, 0, names}
-	value := sum(&p)
+	value := shift(&p)
 	if peek(&p) != 0 do fail("bad expression %q", text)
 	return value
 }

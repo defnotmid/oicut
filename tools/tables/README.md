@@ -13,6 +13,7 @@ odin build tools/tables -out:.work/tables
 .work/tables mp3  > audio/mp3/tables.odin
 .work/tables h265 > video/h265/scan_tables.odin
 .work/tables vp9 .work/vp9-spec.txt > video/vp9/tables.odin
+.work/tables av1 .work/av1spec/av1-spec.txt > video/av1/tables.odin
 ```
 
 The C generators take the `third_party` directory as an optional second
@@ -28,6 +29,7 @@ depends on.
 | `mp3` | minimp3 `minimp3.h`, PDMP3 `pdmp3.c` | Huffman lookup, scalefactor bands and partitions, the synthesis window |
 | `h265` | Kvazaar `src/tables.c`, `src/tables.h` | coefficient and coefficient-group scans |
 | `vp9` | the VP9 specification's text | all 82 `name[dims] = {...}` tables |
+| `av1` | the AV1 specification's text | all 214 `Name[dims] = {...}` tables |
 
 ## VP9
 

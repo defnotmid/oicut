@@ -1,6 +1,7 @@
 package media_native
 
 import media ".."
+import av1e "../../video/av1/encoder"
 import "core:math"
 import "core:mem"
 import "core:slice"
@@ -105,6 +106,17 @@ append_reconstruction :: proc(session: ^media.Session, out: ^[dynamic]u8) {
 			p := c == 0 ? b.y : (c == 1 ? b.u : b.v)
 			stride := c == 0 ? b.y_stride : b.uv_stride
 			for y in 0 ..< h do append(out, ..p[y * stride:y * stride + w])
+		} else if s.av1_encoder != nil {
+			if cfg.bit_depth == 8 {
+				rec, rs := av1e.reconstruction(s.av1_encoder)
+				for y in 0 ..< h do append(out, ..rec[c][y * rs[c]:][:w])
+			} else {
+				rec, rs := av1e.reconstruction16(s.av1_encoder)
+				for y in 0 ..< h do for x in 0 ..< w {
+					v := rec[c][y * rs[c] + x]
+					append(out, u8(v), u8(v >> 8))
+				}
+			}
 		} else {
 			// Decoded HEVC uses one byte per sample for 8-bit pictures, two
 			// little-endian bytes otherwise.
@@ -168,6 +180,42 @@ test_video_round_trip_matches_reconstruction :: proc(t: ^testing.T) {
 			chroma = .Monochrome,
 			qp = 26,
 		},
+		{
+			codec = .AV1,
+			operation = .Encode,
+			width = 16,
+			height = 16,
+			bit_depth = 8,
+			qp = 26,
+			gop_size = 3,
+		},
+		{
+			codec = .AV1,
+			operation = .Encode,
+			width = 16,
+			height = 16,
+			bit_depth = 10,
+			qp = 26,
+			gop_size = 4,
+		},
+		{
+			codec = .AV1,
+			operation = .Encode,
+			width = 16,
+			height = 16,
+			bit_depth = 10,
+			chroma = .YUV444,
+			qp = 26,
+		},
+		{
+			codec = .AV1,
+			operation = .Encode,
+			width = 17,
+			height = 19,
+			bit_depth = 12,
+			chroma = .Monochrome,
+			qp = 26,
+		},
 	}
 	for config in configs {
 		cfg := config
@@ -176,7 +224,7 @@ test_video_round_trip_matches_reconstruction :: proc(t: ^testing.T) {
 		reconstructed: [dynamic]u8
 		defer {delete(packets.data); delete(packets.ranges); delete(reconstructed)}
 		encoder: media.Session
-		enabled := (cfg.codec == .H264 && OICUT_NATIVE_H264) || (cfg.codec == .H265 && OICUT_NATIVE_H265)
+		enabled := cfg.codec == .AV1 || (cfg.codec == .H264 && OICUT_NATIVE_H264) || (cfg.codec == .H265 && OICUT_NATIVE_H265)
 		testing.expect_value(
 			t,
 			media.open(&encoder, cfg, []media.Provider{provider()}),
@@ -217,12 +265,13 @@ test_video_round_trip_matches_reconstruction :: proc(t: ^testing.T) {
 			config = cfg,
 		}
 		defer delete(decoded.bytes)
+		framing := cfg.codec == .AV1 ? media.Framing.Frame : media.Framing.Annex_B
 		for r in packets.ranges {
 			testing.expect_value(
 				t,
 				media.decode(
 					&decoder,
-					{data = packets.data[r.offset:][:r.length], framing = .Annex_B},
+					{data = packets.data[r.offset:][:r.length], framing = framing},
 					{video = capture_video, user = &decoded},
 				),
 				media.Error.None,

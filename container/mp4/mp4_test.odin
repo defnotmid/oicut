@@ -750,3 +750,58 @@ test_chapters_round_trip_and_validation :: proc(t: ^testing.T) {
 		destroy(&w)
 	}
 }
+
+@(test)
+av1_roundtrip :: proc(t: ^testing.T) {
+	// Minimal valid OBU_SEQUENCE_HEADER (type 1, size 11) + OBU_FRAME (type 6, size 4),
+	// plus an OBU_TEMPORAL_DELIMITER (type 2, size 0) that the MP4 writer must strip.
+	seq_obu := [15]u8{
+		0x0A, 0x0D, // OBU_SEQUENCE_HEADER (type=1, has_size=1), size=13
+		0x00, 0x00, 0x00, 0x6B, 0xFC, 0x00, 0x3C, 0x00, 0x2C, 0x42, 0x1D, 0x01, 0x40,
+	}
+	td_obu := [2]u8{0x12, 0x00} // OBU_TEMPORAL_DELIMITER (type=2, has_size=1), size=0
+	frame_obu := [6]u8{0x32, 0x04, 0x10, 0x20, 0x30, 0x40}
+
+	m: Memory_Stream
+	defer delete(m.data)
+	w: Writer
+	tracks := []Track_Config{{codec = .AV1, timescale = 1000, width = 16, height = 12, default_duration = 40}}
+	testing.expect_value(t, create_stream(&w, memory_stream(&m), tracks), Error.None)
+	defer destroy(&w)
+
+	pkt0: [dynamic]u8
+	defer delete(pkt0)
+	append(&pkt0, ..td_obu[:])
+	append(&pkt0, ..seq_obu[:])
+	append(&pkt0, ..frame_obu[:])
+	testing.expect_value(t, write_video_packet(&w, 0, pkt0[:], 0, 0, true), Error.None)
+
+	pkt1: [dynamic]u8
+	defer delete(pkt1)
+	append(&pkt1, ..td_obu[:])
+	append(&pkt1, ..frame_obu[:])
+	testing.expect_value(t, write_video_packet(&w, 0, pkt1[:], 40, 40, false), Error.None)
+	testing.expect_value(t, finish(&w), Error.None)
+
+	r: Reader
+	testing.expect_value(t, open_stream(&r, memory_stream(&m)), Error.None)
+	defer close(&r)
+	testing.expect_value(t, len(r.tracks), 1)
+	tr := &r.tracks[0]
+	testing.expect_value(t, tr.codec, Codec.AV1)
+	testing.expect_value(t, tr.width, 16)
+	testing.expect_value(t, tr.height, 12)
+	testing.expect_value(t, len(tr.config), 4 + len(seq_obu))
+	testing.expect_value(t, tr.config[0], u8(0x81))
+	testing.expect_value(t, string(tr.config[4:]), string(seq_obu[:]))
+
+	s0, e0 := read_sample(&r, 0, 0)
+	testing.expect_value(t, e0, Error.None)
+	testing.expect(t, s0.sync)
+	testing.expect_value(t, len(s0.data), len(seq_obu) + len(frame_obu))
+
+	s1, e1 := read_sample(&r, 0, 1)
+	testing.expect_value(t, e1, Error.None)
+	testing.expect(t, !s1.sync)
+	testing.expect_value(t, string(s1.data), string(frame_obu[:]))
+}

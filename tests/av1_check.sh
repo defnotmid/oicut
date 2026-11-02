@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # AV1 gate, on every fixture from tests/av1_fixtures.sh: the frame header
 # parser against FFmpeg's trace_headers (every element both print must agree,
-# frame by frame), then Vulkan Video decoding against libdav1d, bit-exact, of
-# the raw streams and of MP4/Matroska files through video.Reader.
+# frame by frame), then Vulkan Video and native decoding against libdav1d,
+# bit-exact, of the raw streams, and of MP4/Matroska files through video.Reader.
 set -euo pipefail
 fx=${1:-.work/av1fx}
 work=.work/av1gate
@@ -10,6 +10,7 @@ mkdir -p "$work"
 export TMPDIR=${TMPDIR:-$PWD/.work/tmp}
 odin build tests/av1_headers.odin -file -out:"$work/av1_headers" -o:speed -vet -strict-style
 odin build tests/av1_decode.odin -file -out:"$work/av1_decode" -o:speed
+odin build tests/av1_native_decode.odin -file -out:"$work/av1_native_decode" -o:speed -vet -strict-style
 odin build tests/movie_av1.odin -file -out:"$work/movie_av1" -o:speed
 pass=0 fail=0
 for f in "$fx"/*.obu; do
@@ -52,6 +53,20 @@ for f in "$fx"/*.obu; do
 		pass=$((pass + 1))
 	else
 		echo "FAIL $name decode differs ($fmt): $(cmp "$work/$name.yuv" "$work/$name.ref.yuv" 2>&1 | head -1)"
+		fail=$((fail + 1))
+	fi
+done
+# The native decoder against the same libdav1d output.
+for f in "$fx"/*.obu; do
+	name=$(basename "$f" .obu)
+	if ! "$work/av1_native_decode" "$f" "$work/$name.native.yuv" 2>"$work/$name.native.log"; then
+		echo "FAIL $name native: $(cat "$work/$name.native.log")"
+		fail=$((fail + 1))
+	elif cmp -s "$work/$name.native.yuv" "$work/$name.ref.yuv"; then
+		echo "ok   $name native ($(cat "$work/$name.native.log"))"
+		pass=$((pass + 1))
+	else
+		echo "FAIL $name native differs: $(cmp "$work/$name.native.yuv" "$work/$name.ref.yuv" 2>&1 | head -1)"
 		fail=$((fail + 1))
 	fi
 done

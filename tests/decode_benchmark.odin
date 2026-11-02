@@ -75,7 +75,8 @@ main :: proc() {
 		if e := media.open(&session, config, providers[:]); e != .None do fail("session: %v %s", e, session.error_detail)
 		count = {}
 		start := time.tick_now()
-		for nal in setup do if e := media.decode(&session, {data = nal, framing = .NAL}, receiver); e != .None do fail("parameter set: %v", e)
+		framing: media.Framing = config.codec == .AV1 ? .Frame : .NAL
+		for nal in setup do if e := media.decode(&session, {data = nal, framing = framing}, receiver); e != .None do fail("parameter set: %v", e)
 		for p in packets do if e := media.decode(&session, p, receiver); e != .None do fail("decode: %v %s", e, session.error_detail)
 		if e := media.drain(&session, receiver); e != .None do fail("drain: %v", e)
 		ms := time.duration_milliseconds(time.tick_since(start))
@@ -115,16 +116,16 @@ video_track :: proc(r: ^video.Reader, setup: ^[dynamic][]u8, packets: ^[dynamic]
 	case .H265: codec = .H265
 	case .ProRes: codec = .ProRes
 	case .VP9: codec = .VP9
-	case .AV1: fail("AV1 decodes only in hardware")
+	case .AV1: codec = .AV1
 	}
 	config := media.default_config(codec, .Decode)
 	config.preference = .Native
 	config.width, config.height = r.video.width, r.video.height
 	config.bit_depth = r.bit_depth
 	config.chroma = r.video.chroma
-	config.no_reordering = codec == .ProRes || codec == .VP9
+	config.no_reordering = codec == .ProRes || codec == .VP9 || codec == .AV1
 	nal := codec == .H264 || codec == .H265
-	if nal do for p in r.parameter_sets do append(setup, slice.clone(p))
+	if nal || codec == .AV1 do for p in r.parameter_sets do append(setup, slice.clone(p))
 	for i in 0 ..< len(r.index.pts) {
 		data, alpha: []u8
 		if r.audio.container == .WebM {

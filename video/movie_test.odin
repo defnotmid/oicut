@@ -263,6 +263,11 @@ test_h265_movie_round_trip :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_av1_movie_round_trip :: proc(t: ^testing.T) {
+	round_trip(t, .AV1)
+}
+
+@(test)
 test_writer_refuses_unrepresentable_configs :: proc(t: ^testing.T) {
 	m: mp4.Memory_Stream
 	defer delete(m.data)

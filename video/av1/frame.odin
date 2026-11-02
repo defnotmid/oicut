@@ -505,9 +505,9 @@ set_frame_refs :: proc(p: ^Parser, h: ^Frame_Header, last, gold: u8) {
 	if r := find(&used, &shifted, cur, true, true); r >= 0 {idx[ALTREF_FRAME - LAST_FRAME] = r; used[r] = true}
 	if r := find(&used, &shifted, cur, true, false); r >= 0 {idx[BWDREF_FRAME - LAST_FRAME] = r; used[r] = true}
 	if r := find(&used, &shifted, cur, true, false); r >= 0 {idx[ALTREF2_FRAME - LAST_FRAME] = r; used[r] = true}
-	for ref in ([5]int{LAST2_FRAME, LAST3_FRAME, BWDREF_FRAME, ALTREF2_FRAME, ALTREF_FRAME}) {
-		if idx[ref - LAST_FRAME] >= 0 do continue
-		if r := find(&used, &shifted, cur, false, true); r >= 0 {idx[ref - LAST_FRAME] = r; used[r] = true}
+	for ref in REF_FRAME_LIST {
+		if idx[int(ref) - LAST_FRAME] >= 0 do continue
+		if r := find(&used, &shifted, cur, false, true); r >= 0 {idx[int(ref) - LAST_FRAME] = r; used[r] = true}
 	}
 	// Anything left: the earliest of all.
 	earliest, best := -1, 0
@@ -535,7 +535,6 @@ frame_size :: proc(s: ^Sequence_Header, h: ^Frame_Header, b: ^Bits) {
 
 @(private)
 superres_params :: proc(s: ^Sequence_Header, h: ^Frame_Header, b: ^Bits) {
-	SUPERRES_NUM :: 8
 	if s.enable_superres do h.use_superres = flag(b)
 	denom := SUPERRES_NUM
 	if h.use_superres {
@@ -678,9 +677,6 @@ quantization_params :: proc(s: ^Sequence_Header, h: ^Frame_Header, b: ^Bits) {
 
 @(private)
 segmentation_params :: proc(h: ^Frame_Header, b: ^Bits) {
-	BITS := [SEG_LVL_MAX]int{8, 6, 6, 6, 6, 3, 0, 0}
-	SIGNED := [SEG_LVL_MAX]bool{true, true, true, true, true, false, false, false}
-	LIMIT := [SEG_LVL_MAX]i32{255, 63, 63, 63, 63, 7, 0, 0}
 	h.segmentation_enabled = flag(b)
 	if !h.segmentation_enabled {
 		h.feature_enabled, h.feature_data = {}, {}
@@ -700,10 +696,12 @@ segmentation_params :: proc(h: ^Frame_Header, b: ^Bits) {
 			value: i32
 			if flag(b) {
 				h.feature_enabled[i] |= 1 << uint(j)
-				if SIGNED[j] {
-					value = clamp(su(b, 1 + BITS[j]), -LIMIT[j], LIMIT[j])
+				bits := int(SEGMENTATION_FEATURE_BITS[j])
+				limit := i32(SEGMENTATION_FEATURE_MAX[j])
+				if SEGMENTATION_FEATURE_SIGNED[j] != 0 {
+					value = clamp(su(b, 1 + bits), -limit, limit)
 				} else {
-					value = clamp(i32(f(b, BITS[j])), 0, LIMIT[j])
+					value = clamp(i32(f(b, bits)), 0, limit)
 				}
 			}
 			h.feature_data[i][j] = i16(value)
@@ -763,10 +761,9 @@ cdef_params :: proc(s: ^Sequence_Header, h: ^Frame_Header, b: ^Bits) {
 @(private)
 lr_params :: proc(s: ^Sequence_Header, h: ^Frame_Header, b: ^Bits) {
 	if h.all_lossless || h.allow_intrabc || !s.enable_restoration do return
-	REMAP := [4]u8{0, 3, 1, 2} // none, switchable, Wiener, self-guided
 	planes := s.color.mono_chrome ? 1 : 3
 	for i in 0 ..< planes {
-		h.frame_restoration_type[i] = REMAP[f(b, 2)]
+		h.frame_restoration_type[i] = REMAP_LR_TYPE[f(b, 2)]
 		if h.frame_restoration_type[i] != 0 {
 			h.uses_lr = true
 			if i > 0 do h.uses_chroma_lr = true
@@ -827,7 +824,6 @@ skip_mode_params :: proc(p: ^Parser, h: ^Frame_Header, b: ^Bits) {
 // 5.9.24-5.9.29
 @(private)
 global_motion_params :: proc(h: ^Frame_Header, prev: ^[NUM_REF_FRAMES][6]i32, b: ^Bits) {
-	IDENTITY, TRANSLATION, ROTZOOM, AFFINE :: 0, 1, 2, 3
 	for ref in LAST_FRAME ..= ALTREF_FRAME {
 		h.gm_type[ref] = IDENTITY
 		h.gm_params[ref] = {0, 0, 1 << WARPEDMODEL_PREC_BITS, 0, 0, 1 << WARPEDMODEL_PREC_BITS}

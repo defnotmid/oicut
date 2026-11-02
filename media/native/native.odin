@@ -10,6 +10,8 @@ import avce "../../video/h264/encoder"
 import hevcd "../../video/h265/decoder"
 import hevce "../../video/h265/encoder"
 import proresd "../../video/prores/decoder"
+import av1d "../../video/av1/decoder"
+import av1e "../../video/av1/encoder"
 import vp9d "../../video/vp9/decoder"
 import vp9e "../../video/vp9/encoder"
 
@@ -122,7 +124,7 @@ probe :: proc(config: media.Config, user: rawptr) -> media.Error {
 	case .VP9:
 		if config.operation == .Encode && (depth != 8 || config.chroma != .YUV420) do return .Unsupported // profile 0
 	case .AV1:
-		return .Unsupported // hardware only (media/vulkan)
+		// Profiles 0, 1, 2 (8/10/12-bit, monochrome / 4:2:0 / 4:2:2 / 4:4:4) for decode and encode.
 	case .FLAC, .MP3, .Opus, .ALAC, .Vorbis:
 		// Decoded by the audio package, the one audio decode implementation.
 		switch audio.check_config(AUDIO_CODECS[config.codec], config.sample_rate, config.channels, config.extradata) {
@@ -189,6 +191,8 @@ State :: struct {
 	vp9_alpha:          ^vp9d.Decoder, // the alpha stream, opened on its first packet
 	vp9_encoders:       [2]^vp9e.Encoder, // colour, and alpha with Config.alpha
 	vp9_alpha_planes:   []u8, // the alpha encoder's input: alpha as luma, flat chroma
+	av1_decoder:        ^av1d.Decoder,
+	av1_encoder:        ^av1e.Encoder,
 	audio_decoder:      ^audio.Decoder, // AAC, FLAC, MP3, Opus, ALAC and Vorbis decoding, the audio package's
 	encoded:            [dynamic]u8,
 	decoded:            [dynamic]^hevcd.Picture,
@@ -234,7 +238,7 @@ open_native :: proc(session: ^media.Session, config: media.Config, user: rawptr)
 		case .VP9:
 			s.vp9_decoder = new(vp9d.Decoder); vp9d.init_decoder(s.vp9_decoder, s.pool)
 		case .AV1:
-			return .Unsupported
+			s.av1_decoder = new(av1d.Decoder); av1d.init_decoder(s.av1_decoder, s.pool)
 		case .FLAC, .MP3, .Opus, .ALAC, .Vorbis, .AAC:
 			s.audio_decoder = new(audio.Decoder)
 			if s.audio_decoder == nil do return .Codec_Error
@@ -248,10 +252,12 @@ open_native :: proc(session: ^media.Session, config: media.Config, user: rawptr)
 	}
 	if config.codec == .H265 do s.encoded = make([dynamic]u8, 0, 65536)
 	switch config.codec {
-	case .ProRes, .FLAC, .MP3, .Opus, .ALAC, .Vorbis, .AV1:
-		return .Unsupported // probe admits these for decoding only (AV1 not at all)
+	case .ProRes, .FLAC, .MP3, .Opus, .ALAC, .Vorbis:
+		return .Unsupported // probe admits these for decoding only
 	case .VP9:
 		return open_vp9_encoders(session, s, config, options)
+	case .AV1:
+		return open_av1_encoder(session, s, config, options)
 	case .H264:
 		when OICUT_NATIVE_H264 {
 			s.avc_encoder = new(avce.Encoder_State)
@@ -370,6 +376,8 @@ close_native :: proc(session: ^media.Session) {
 	if s.vp9_alpha != nil {vp9d.destroy_decoder(s.vp9_alpha); free(s.vp9_alpha)}
 	for e in s.vp9_encoders do if e != nil {vp9e.destroy_encoder(e); free(e)}
 	delete(s.vp9_alpha_planes)
+	if s.av1_decoder != nil {av1d.destroy_decoder(s.av1_decoder); free(s.av1_decoder)}
+	if s.av1_encoder != nil {av1e.destroy_encoder(s.av1_encoder); free(s.av1_encoder)}
 	if s.audio_decoder != nil {audio.destroy_decoder(s.audio_decoder); free(s.audio_decoder)}
 	if s.aac_encoder != nil {aace.destroy_encoder(s.aac_encoder); free(s.aac_encoder)}
 	delete(s.encoded); delete(s.decoded); delete(s.input); delete(s.pcm)
@@ -716,7 +724,7 @@ decode_native :: proc(
 	s := (^State)(session.state)
 	switch session.config.codec {
 	case .AV1:
-		return .Unsupported
+		return decode_av1(session, s, packet, receiver)
 	case .ProRes:
 		return decode_prores(session, s, packet, receiver)
 	case .VP9:
@@ -789,6 +797,7 @@ encode_video_native :: proc(
 	frame := frame
 	if frame.chroma_interleaved do split_chroma(s, &frame) or_return
 	if s.vp9_encoders[0] != nil do return encode_vp9(session, s, frame, receiver)
+	if s.av1_encoder != nil do return encode_av1(session, s, frame, receiver)
 	when OICUT_NATIVE_H264 {
 		if s.avc_encoder != nil {
 			if frame.storage_bits != 8 || frame.planes[1].stride != frame.planes[2].stride do return .Unsupported
@@ -1111,5 +1120,135 @@ encode_vp9 :: proc(session: ^media.Session, s: ^State, frame: media.Video_Frame,
 		out.alpha = alpha
 	}
 	if receiver.packet != nil do receiver.packet(out, receiver.user)
+	return .None
+}
+
+@(private)
+decode_av1 :: proc(session: ^media.Session, s: ^State, packet: media.Packet, receiver: media.Receiver) -> media.Error {
+	if packet.framing != .Frame do return .Invalid_Input
+	p, shown, err := av1d.decode_packet(s.av1_decoder, packet.data)
+	switch err {
+	case .None:
+	case .Unsupported:
+		session.error_detail = "AV1 frame uses unsupported features"
+		return .Unsupported
+	case .Invalid_Data:
+		session.error_detail = "malformed or incomplete AV1 frame"
+		return .Codec_Error
+	}
+	if !shown || receiver.video == nil do return .None
+	color := media.Color{p.color_primaries, p.transfer_characteristics, p.matrix_coefficients, p.color_range}
+	if color.primaries == 2 && color.transfer == 2 && color.matrix_coeffs == 2 && !color.full_range {
+		color = {}
+	}
+	frame := media.Video_Frame {
+		width        = p.width,
+		height       = p.height,
+		coded_width  = p.strides[0],
+		coded_height = p.height,
+		bit_depth    = int(p.bit_depth),
+		storage_bits = p.bit_depth == 8 ? 8 : 16,
+		color        = color,
+	}
+	switch {
+	case p.mono_chrome:
+		frame.chroma = .Monochrome
+	case p.subsampling_x == 1 && p.subsampling_y == 1:
+		frame.chroma = .YUV420
+	case p.subsampling_x == 1 && p.subsampling_y == 0:
+		frame.chroma = .YUV422
+	case:
+		frame.chroma = .YUV444
+	}
+	num_planes := p.mono_chrome ? 1 : 3
+	for i in 0 ..< num_planes {
+		if p.bit_depth == 8 {
+			frame.planes[i] = {p.planes8[i], p.strides[i]}
+		} else {
+			frame.planes[i] = {u16_bytes(p.planes16[i]), p.strides[i] * 2}
+		}
+	}
+	receiver.video(frame, receiver.user)
+	return .None
+}
+
+@(private)
+open_av1_encoder :: proc(session: ^media.Session, s: ^State, config: media.Config, options: Options) -> media.Error {
+	gop := config.gop_size == 0 ? 15 : config.gop_size
+	depth := config.bit_depth == 0 ? 8 : config.bit_depth
+	subsampling: av1e.Chroma_Subsampling
+	switch config.chroma {
+	case .YUV420:
+		subsampling = .YUV420
+	case .YUV422:
+		subsampling = .YUV422
+	case .YUV444:
+		subsampling = .YUV444
+	case .Monochrome:
+		subsampling = .Monochrome
+	}
+	av1_config := av1e.Encoder_Config {
+		width             = config.width,
+		height            = config.height,
+		bit_depth         = depth,
+		subsampling       = subsampling,
+		base_q_idx        = vp9_q_index(config.qp),
+		keyframe_interval = gop,
+		tile_cols_log2    = 2,
+		ultrafast         = config.ultrafast,
+		pool              = options.pool,
+	}
+	s.av1_encoder = new(av1e.Encoder)
+	if av1e.init_encoder(s.av1_encoder, av1_config) != .None {
+		session.error_detail = "AV1 encoder refused the configuration"
+		return .Invalid_Config
+	}
+	return .None
+}
+
+@(private)
+encode_av1 :: proc(session: ^media.Session, s: ^State, frame: media.Video_Frame, receiver: media.Receiver) -> media.Error {
+	num_planes := frame.chroma == .Monochrome ? 1 : 3
+	if frame.bit_depth == 8 && frame.storage_bits == 8 {
+		strides := [3]int{frame.planes[0].stride, frame.planes[1].stride, frame.planes[2].stride}
+		packet, keyframe, err := av1e.encode_frame(
+			s.av1_encoder,
+			{frame.planes[0].data, frame.planes[1].data, frame.planes[2].data},
+			strides,
+		)
+		if err != .None do return err == .Out_Of_Memory ? .Codec_Error : .Invalid_Input
+		if receiver.packet != nil do receiver.packet({data = packet, framing = .Frame, keyframe = keyframe}, receiver.user)
+		return .None
+	}
+	if frame.storage_bits != 16 do return .Unsupported
+	sw, sh := media.chroma_subsampling(frame.chroma)
+	cw, ch := (frame.width + sw - 1) / sw, (frame.height + sh - 1) / sh
+	chroma_samples := frame.chroma == .Monochrome ? 0 : cw * ch
+	total := frame.width * frame.height + 2 * chroma_samples
+	if len(s.input) != total {
+		delete(s.input)
+		s.input = make([]u16, total)
+	}
+	limit := u16(1) << uint(frame.bit_depth)
+	dst_offset := 0
+	planes16: [3][]u16
+	strides16: [3]int
+	for i in 0 ..< num_planes {
+		w := i == 0 ? frame.width : cw
+		h := i == 0 ? frame.height : ch
+		p := frame.planes[i]
+		planes16[i] = s.input[dst_offset:][:w * h]
+		strides16[i] = w
+		for y in 0 ..< h do for x in 0 ..< w {
+			at := y * p.stride + 2 * x
+			val := u16(p.data[at]) | (u16(p.data[at + 1]) << 8)
+			if val >= limit do return .Invalid_Input
+			planes16[i][y * w + x] = val
+		}
+		dst_offset += w * h
+	}
+	packet, keyframe, err := av1e.encode_frame16(s.av1_encoder, planes16, strides16)
+	if err != .None do return err == .Out_Of_Memory ? .Codec_Error : .Invalid_Input
+	if receiver.packet != nil do receiver.packet({data = packet, framing = .Frame, keyframe = keyframe}, receiver.user)
 	return .None
 }

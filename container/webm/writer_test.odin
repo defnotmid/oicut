@@ -245,3 +245,25 @@ writer_chapters_roundtrip_and_validation :: proc(t: ^testing.T) {
 	}
 }
 
+@(test)
+writer_av1_roundtrip :: proc(t: ^testing.T) {
+	m: Writer_Memory
+	defer delete(m.data)
+	w: Writer
+	av1c := []u8{0x81, 0x0D, 0x0C, 0x00, 0x0A, 0x0B, 0x00, 0x00, 0x00, 0x35, 0xFF, 0x00, 0x0F, 0x00, 0x0B, 0x41, 0x30}
+	testing.expect_value(t, create_stream(&w, writer_memory_stream(&m), {width = 32, height = 24, codec = .AV1, codec_private = av1c, default_duration = 40_000_000}), .None)
+	defer destroy(&w)
+	testing.expect_value(t, write_sample(&w, {0x32, 0x02, 0xAA, 0xBB}, 0, true), .None)
+	testing.expect_value(t, write_sample(&w, {0x32, 0x02, 0xCC, 0xDD}, 40_000_000, false), .None)
+	testing.expect_value(t, finish(&w), .None)
+
+	r: Reader
+	testing.expect_value(t, open_stream(&r, writer_memory_stream(&m)), .None)
+	defer close(&r)
+	testing.expect_value(t, len(r.tracks), 1)
+	testing.expect_value(t, r.tracks[0].codec, Codec.AV1)
+	testing.expect_value(t, r.tracks[0].codec_id, "V_AV1")
+	testing.expect_value(t, string(r.tracks[0].codec_private), string(av1c))
+	testing.expect_value(t, len(r.tracks[0].samples), 2)
+}
+

@@ -83,7 +83,11 @@ video.destroy(&w)
   (`base_q_idx = 5 * qp`, video only: audio is `Unsupported`). With
   `transparency = .Straight` the alpha travels as a second VP9 stream in
   BlockAdditional 1, which Chrome, Firefox and Edge composite. Files are
-  still several times larger than libvpx's (see `video/vp9/encoder`).
+  within a few percent of libvpx's at equal quality ([BENCHMARKS](../BENCHMARKS.md)).
+- **AV1:** `codec = .AV1` writes MP4 with the native AV1 encoder, audio
+  included, and no transparency. It shares VP9's `base_q_idx = 5 * qp`, so
+  the same `qp` gives about 3 dB lower PSNR than H.264 or H.265; lower `qp`
+  by about five for similar quality.
 - **Transparency:** `transparency = .Premultiplied` or `.Straight` keeps alpha
   as an H.265 auxiliary alpha layer (native encoder, `OICUT_PATENTED` builds; Annex F, laid out as
   Apple's VideoToolbox encoder writes it), which Safari, QuickTime and
@@ -264,10 +268,10 @@ video.close_reader(&r)
   packets with `mp4.Reader` and `mp4.Writer`, continuing the timestamps. The
   parameter sets must be identical, so use the same configuration and
   backend for every segment.
-- **Containers and codecs:** writing is MP4 with H.264/H.265 and AAC-LC.
+- **Containers and codecs:** writing is MP4 with H.264/H.265/AV1 and AAC-LC.
   Reading adds ProRes and PCM in `.mov`, FLAC and MP3 in MP4, VP9, H.264,
   H.265, AAC, FLAC, MP3, Opus and PCM in WebM/MKV, AV1 in MP4 and WebM/MKV
-  (Vulkan Video only), Ogg Opus and Vorbis, `.wav`, `.flac` and `.mp3`. VP8 is
+  (Vulkan Video or native), Ogg Opus and Vorbis, `.wav`, `.flac` and `.mp3`. VP8 is
   not decoded.
 - **VP9 seek cost:** a far seek decodes from the previous keyframe. At
   1080p, a 60-frame GOP and one thread, that is up to about 0.2 s; encode

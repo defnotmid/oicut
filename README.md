@@ -15,7 +15,7 @@ Video:
 - `video/h265/{encoder,decoder}`: H.265 Main, Main 10 and range extensions; HEVC with an alpha layer, encoded and decoded ([README](video/h265/README.md)).
 - `video/prores/decoder`: Apple ProRes 422 and 4444/XQ with alpha ([README](video/prores/README.md)).
 - `video/vp9/{encoder,decoder}`: VP9 decoding, profiles 0–3 with alpha streams; encoding, profile 0 with alpha ([README](video/vp9/README.md)).
-- `video/av1`: AV1 syntax for hardware decoding through Vulkan Video ([README](video/av1/README.md)).
+- `video/av1/{encoder,decoder}`: AV1 decoding, profiles 0–2 at 8 to 12 bits, identical to dav1d; encoding, the same profiles; and the syntax Vulkan Video decodes from ([README](video/av1/README.md)).
 
 Audio:
 - `audio/aac/{encoder,decoder}`: AAC-LC, 1 to 8 channels ([README](audio/aac/README.md)).
@@ -48,7 +48,7 @@ Putting them together:
 - `media/mediafoundation`: the Windows Media Foundation system provider, H.264 and H.265 decoding and encoding through the transforms Windows ships (H.265 with the HEVC Video Extensions) ([README](media/mediafoundation/README.md)).
 - `media/audiotoolbox`: the macOS AudioToolbox system provider, AAC-LC, HE-AAC and HE-AAC v2 decoding and AAC-LC encoding ([README](media/audiotoolbox/README.md)).
 - `audio`: any file's first audio track (AAC, PCM, FLAC, MP3, Opus, ALAC, Vorbis in MP4, Matroska, WAV, FLAC, MP3 or Ogg) as interleaved `f32` in WAVE channel order, with seeking; `decode` for a file in memory ([README](audio/README.md)).
-- `video`: RGBA or planar frames and `f32` PCM from and to movie files (its audio through `audio`), with frame-accurate seeking; writes MP4/M4A (H.264, H.265, HEVC with alpha, AAC-LC) and WebM (VP9, with alpha) ([README](video/README.md)).
+- `video`: RGBA or planar frames and `f32` PCM from and to movie files (its audio through `audio`), with frame-accurate seeking; writes MP4/M4A (H.264, H.265, HEVC with alpha, AV1, AAC-LC) and WebM (VP9, with alpha) ([README](video/README.md)).
 - `viewer`: an SDL3 player for all of the above.
 
 Each layer imports only the ones below it: `common`, then the codecs and
@@ -113,8 +113,8 @@ load, is in [BENCHMARKS.md](BENCHMARKS.md), which the script writes;
 The native codecs and containers are plain Odin and build for Linux, Windows
 and macOS. Hardware video goes through Vulkan Video on Linux (Windows needs
 only its Vulkan loader name added) and VideoToolbox on macOS, where H.264 and
-HEVC decode and encode in hardware. AV1 decodes only in hardware, through
-Vulkan Video.
+HEVC decode and encode in hardware. AV1 decodes in hardware through Vulkan
+Video, and natively everywhere.
 
 ## Sources and licenses
 

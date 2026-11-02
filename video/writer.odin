@@ -22,7 +22,7 @@ Video_Codec :: enum u8 {
 	H265,
 	ProRes, // reading only
 	VP9,    // written to WebM (native encoder, no audio); alpha needs transparency Straight
-	AV1,    // reading only, with Vulkan Video AV1 decoding
+	AV1,    // written to MP4 (native encoder); decoded via Vulkan Video or native
 }
 
 // The audio package's errors, shared by reading and writing.
@@ -176,10 +176,10 @@ create_output :: proc(w: ^Writer, config: Writer_Config, path: string, stream: i
 	if w.has_video {
 		if c.qp == 0 do c.qp = 23
 		if c.width < 16 || c.height < 16 || c.width > 8192 || c.height > 8192 || (c.width | c.height) & 1 != 0 do return .Invalid_Config
-		if c.codec != .H264 && c.codec != .H265 && c.codec != .VP9 do return .Unsupported // ProRes and AV1 are decoded, not written
+		if c.codec != .H264 && c.codec != .H265 && c.codec != .VP9 && c.codec != .AV1 do return .Unsupported // ProRes is decoded, not written
 		if c.fps_num <= 0 || c.fps_den <= 0 || c.fps_num > 1 << 20 || c.fps_den > 1 << 20 || c.qp < 1 || c.qp > 51 || c.gop < 0 do return .Invalid_Config
 		if c.transparency != .None {
-			if c.codec == .H264 do return .Unsupported
+			if c.codec == .H264 || c.codec == .AV1 do return .Unsupported
 			if c.codec == .VP9 && c.transparency != .Straight do return .Invalid_Config // VP9 alpha is straight
 			if c.alpha == .Opaque do return .Invalid_Config
 		}
@@ -192,7 +192,7 @@ create_output :: proc(w: ^Writer, config: Writer_Config, path: string, stream: i
 		w.timescale = u32(timescale)
 		w.frame_duration = i64(c.fps_den * (timescale / c.fps_num))
 
-		video := media.default_config(c.codec == .H264 ? .H264 : (c.codec == .H265 ? .H265 : .VP9), .Encode)
+		video := media.default_config(VIDEO_CODECS[c.codec], .Encode)
 		video.preference = c.preference
 		video.width, video.height = c.width, c.height
 		video.qp = i32(c.qp)
@@ -232,7 +232,7 @@ create_output :: proc(w: ^Writer, config: Writer_Config, path: string, stream: i
 		if c.transparency != .None do hevc_sei = hevce.alpha_info_sei_nal(c.transparency == .Premultiplied, 8)
 		w.video_track = track_count
 		tracks[track_count] = {
-			codec            = c.codec == .H264 ? .H264 : .H265,
+			codec            = c.codec == .H264 ? .H264 : (c.codec == .AV1 ? .AV1 : .H265),
 			timescale        = w.timescale,
 			width            = c.width,
 			height           = c.height,
@@ -402,6 +402,18 @@ on_video_packet :: proc(packet: media.Packet, user: rawptr) {
 	if w.err != .None do return
 	if w.config.codec == .VP9 {
 		add_vp9_packet(w, packet)
+		return
+	}
+	if w.config.codec == .AV1 {
+		pts := w.samples * w.frame_duration
+		if w.queue_head < len(w.queued) && audio_before(w, w.queued[w.queue_head].pts, pts, 0) {
+			flush_audio(w, pts, INTERLEAVE_SECONDS)
+		}
+		if e := mp4.write_video_packet(&w.mux, w.video_track, packet.data, pts, pts, packet.keyframe); e != .None {
+			w.err = mp4_error(e)
+			return
+		}
+		w.samples += 1
 		return
 	}
 	codec: mp4.Codec = w.config.codec == .H264 ? .H264 : .H265

@@ -262,6 +262,7 @@ DECODE=(
 	"vp9-p0-libvpx|vp9-p0.webm|video|VP9 profile 0, 1080p|$LIBVPX|libvpx-vp9"
 	"vp9-p2|vp9-p2.webm|video|VP9 profile 2, 10-bit|$FFMPEG vp9|"
 	"vp9-p2-libvpx|vp9-p2.webm|video|VP9 profile 2, 10-bit|$LIBVPX|libvpx-vp9"
+	"av1-720p10|av1-720p10.mp4|video|AV1 Main, 10-bit, 720p|dav1d 1.5.4|libdav1d"
 	"prores-422hq|prores-hq.mov|video|ProRes 422 HQ, 1080p|$FFMPEG prores|"
 	"prores-4444|prores-4444.mov|video|ProRes 4444, 10-bit|$FFMPEG prores|"
 	"prores-422hq-16t|prores-hq.mov|video|ProRes 422 HQ, 1080p, 16 threads|$FFMPEG prores||16"

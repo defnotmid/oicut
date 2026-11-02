@@ -121,11 +121,11 @@ create_stream :: proc(w: ^Writer, stream: io.Stream, tracks: []Track_Config, opt
 	for t in tracks {
 		if t.timescale == 0 do return .Invalid_Argument
 		switch t.codec {
-		case .H264, .H265:
+		case .H264, .H265, .AV1:
 			if t.width <= 0 || t.height <= 0 || t.width > 65535 || t.height > 65535 do return .Invalid_Argument
 		case .AAC:
 			if t.sample_rate <= 0 || t.channels <= 0 || t.channels > 255 do return .Invalid_Argument
-		case .ProRes, .PCM, .FLAC, .MP3, .AV1, .ALAC, .Opus:
+		case .ProRes, .PCM, .FLAC, .MP3, .ALAC, .Opus:
 			return .Unsupported // sample entries that are read, not yet written
 		case .Unknown:
 			return .Invalid_Argument
@@ -213,6 +213,7 @@ write_ftyp :: proc(w: ^Writer, b: ^[dynamic]u8) {
 		put_type(b, "isom")
 		put_type(b, "iso2")
 		for t in w.tracks do if t.config.codec == .H264 {put_type(b, "avc1"); break}
+		for t in w.tracks do if t.config.codec == .AV1 {put_type(b, "av01"); break}
 		put_type(b, "mp41")
 	}
 	end_box(b, start)
@@ -344,13 +345,52 @@ add_annex_b :: proc(w: ^Writer, data: []u8) -> Error {
 	return count == 0 ? .Invalid_Data : .None
 }
 
-// Adds raw bytes to the open audio sample.
+// Adds raw bytes to the open audio or AV1 sample.
 add_bytes :: proc(w: ^Writer, data: []u8) -> Error {
-	if !w.sample.active || w.tracks[w.sample.track].config.codec != .AAC do return .Invalid_Argument
+	if !w.sample.active do return .Invalid_Argument
+	codec := w.tracks[w.sample.track].config.codec
+	if codec == .AV1 do return add_av1_obus(w, data)
+	if codec != .AAC do return .Invalid_Argument
 	if len(data) > int(max(u32)) - int(w.sample.size) do return .Unsupported
 	append_payload(w, data) or_return
 	w.sample.size += u32(len(data))
 	return .None
+}
+
+// Adds the OBUs of an AV1 temporal unit to the open sample, capturing the
+// sequence header for `av1C` and stripping temporal delimiter / padding OBUs.
+@(private)
+add_av1_obus :: proc(w: ^Writer, data: []u8) -> Error {
+	if !w.sample.active do return .Invalid_Argument
+	t := &w.tracks[w.sample.track]
+	if t.config.codec != .AV1 || len(data) == 0 do return .Invalid_Data
+	pos := 0
+	count := 0
+	for pos < len(data) {
+		obu, payload, obu_type, ok := next_av1_obu(data, &pos)
+		if !ok do return .Invalid_Data
+		count += 1
+		switch obu_type {
+		case 2, 8, 15:
+			// OBU_TEMPORAL_DELIMITER, OBU_TILE_LIST, OBU_PADDING are omitted in ISO-BMFF.
+			continue
+		case 1:
+			// OBU_SEQUENCE_HEADER: validate and store for `av1C`.
+			if _, valid := parse_av1_seq(payload); !valid do return .Invalid_Data
+			if len(t.parameter_sets) == 0 {
+				seq_copy, err := make([]u8, len(obu))
+				if err != nil do return .Out_Of_Memory
+				copy(seq_copy, obu)
+				append(&t.parameter_sets, Parameter_Set{type = 1, id = 0, data = seq_copy})
+			} else if string(t.parameter_sets[0].data) != string(obu) {
+				return .Unsupported
+			}
+		}
+		if len(obu) > int(max(u32)) - int(w.sample.size) do return .Unsupported
+		append_payload(w, obu) or_return
+		w.sample.size += u32(len(obu))
+	}
+	return count == 0 ? .Invalid_Data : .None
 }
 
 // Closes the open sample. A video sample containing an IDR/IRAP picture is a
@@ -413,7 +453,9 @@ write_video_packet :: proc(
 ) -> Error {
 	begin_sample(w, track, pts, dts, duration) or_return
 	err: Error
-	if framing == .Annex_B {
+	if w.tracks[track].config.codec == .AV1 {
+		err = add_av1_obus(w, data)
+	} else if framing == .Annex_B {
 		err = add_annex_b(w, data)
 	} else {
 		for pos := 0; err == .None && pos < len(data); {
@@ -500,9 +542,9 @@ finish :: proc(w: ^Writer) -> Error {
 	for t in w.tracks {
 		if len(t.samples) == 0 do continue
 		if t.config.codec == .AAC && len(t.config.audio_specific_config) == 0 do return .Invalid_Data
-		if t.config.codec == .H264 || t.config.codec == .H265 {
+		if t.config.codec == .H264 || t.config.codec == .H265 || t.config.codec == .AV1 {
 			has_sps := false
-			for p in t.parameter_sets do if p.type == 7 || p.type == 33 do has_sps = true
+			for p in t.parameter_sets do if p.type == 7 || p.type == 33 || p.type == 1 do has_sps = true
 			if !has_sps do return .Invalid_Data
 		}
 	}
@@ -920,11 +962,11 @@ build_stbl :: proc(w: ^Writer, b: ^[dynamic]u8, t: ^Track_Writer, id: u32, timin
 	stsd := begin_full_box(b, "stsd", 0, 0)
 	put_u32(b, 1)
 	switch t.config.codec {
-	case .H264, .H265:
+	case .H264, .H265, .AV1:
 		build_visual_entry(w, b, t) or_return
 	case .AAC:
 		build_audio_entry(b, t, id, timing)
-	case .Unknown, .ProRes, .PCM, .FLAC, .MP3, .AV1, .ALAC, .Opus:
+	case .Unknown, .ProRes, .PCM, .FLAC, .MP3, .ALAC, .Opus:
 		return .Invalid_Argument
 	}
 	end_box(b, stsd)
@@ -1024,8 +1066,8 @@ patch_u32 :: proc(b: ^[dynamic]u8, at: int, v: u32) {
 
 @(private)
 build_visual_entry :: proc(w: ^Writer, b: ^[dynamic]u8, t: ^Track_Writer) -> Error {
-	h264 := t.config.codec == .H264
-	entry := begin_box(b, h264 ? "avc1" : "hvc1")
+	box_type := t.config.codec == .H264 ? "avc1" : (t.config.codec == .AV1 ? "av01" : "hvc1")
+	entry := begin_box(b, box_type)
 	put_zeros(b, 6)
 	put_u16(b, 1) // data_reference_index
 	put_zeros(b, 16)
@@ -1038,7 +1080,13 @@ build_visual_entry :: proc(w: ^Writer, b: ^[dynamic]u8, t: ^Track_Writer) -> Err
 	put_zeros(b, 32) // compressorname
 	put_u16(b, 0x0018)
 	put_u16(b, 0xFFFF)
-	if h264 {build_avcc(w, b, t) or_return} else {build_hvcc(w, b, t) or_return}
+	if t.config.codec == .H264 {
+		build_avcc(w, b, t) or_return
+	} else if t.config.codec == .AV1 {
+		build_av1c(b, t) or_return
+	} else {
+		build_hvcc(w, b, t) or_return
+	}
 	if t.config.color.primaries != 0 {
 		colr := begin_box(b, "colr")
 		put_type(b, "nclx")
@@ -1054,6 +1102,24 @@ build_visual_entry :: proc(w: ^Writer, b: ^[dynamic]u8, t: ^Track_Writer) -> Err
 	end_box(b, pasp)
 	end_box(b, entry)
 	return .None
+}
+
+@(private)
+build_av1c :: proc(b: ^[dynamic]u8, t: ^Track_Writer) -> Error {
+	for p in t.parameter_sets {
+		if p.type != 1 do continue
+		pos := 0
+		_, payload, obu_type, ok := next_av1_obu(p.data, &pos)
+		if !ok || obu_type != 1 do return .Invalid_Data
+		hdr, valid := parse_av1_seq(payload)
+		if !valid do return .Invalid_Data
+		av1c := begin_box(b, "av1C")
+		append(b, ..hdr[:])
+		append(b, ..p.data)
+		end_box(b, av1c)
+		return .None
+	}
+	return .Invalid_Data
 }
 
 @(private)

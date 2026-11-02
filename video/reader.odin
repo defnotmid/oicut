@@ -803,7 +803,7 @@ advance_video :: proc(r: ^Reader) -> Error {
 		// packet holding only hidden frames leaves its timestamp unused. AV1
 		// pictures come back from the GPU a few packets later, one per
 		// temporal unit, so their timestamps stay queued.
-		if r.video.codec != .AV1 do clear(&r.pending)
+		if r.video.codec != .AV1 || r.session.backend == .Native do clear(&r.pending)
 		return r.err
 	}
 	size := r.nal_length_size

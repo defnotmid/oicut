@@ -19,7 +19,7 @@ Codec :: enum u8 {
 	PCM,    // QuickTime uncompressed audio; one chunk per sample, see Pcm_Format
 	FLAC,   // fLaC sample entry; dfLa metadata blocks in audio_specific_config
 	MP3,    // mp4a with object type 0x6B/0x69, or QuickTime .mp3; one frame per sample
-	AV1,    // av01 sample entry; av1C record in config; one temporal unit per sample (reading only)
+	AV1,    // av01 sample entry; av1C record in config; one temporal unit per sample
 	ALAC,   // alac sample entry; 24-byte ALACSpecificConfig in audio_specific_config (reading only)
 	Opus,   // Opus sample entry; dOps converted to OpusHead in audio_specific_config (reading only)
 }
@@ -465,4 +465,150 @@ is_picture_nal :: proc(codec: Codec, nal: []u8) -> bool {
 		return type >= 1 && type <= 5
 	}
 	return (nal[0] >> 1) & 0x3F < 32
+}
+
+// Steps through size-delimited AV1 OBUs in a temporal unit, returning the full
+// OBU bytes (header + size + payload), the payload slice, and the 4-bit type.
+@(private)
+next_av1_obu :: proc(data: []u8, pos: ^int) -> (obu, payload: []u8, obu_type: u8, ok: bool) {
+	i := pos^
+	if i >= len(data) do return nil, nil, 0, false
+	hdr := data[i]
+	if (hdr & 0x80) != 0 do return nil, nil, 0, false
+	obu_type = (hdr >> 3) & 0x0F
+	has_ext := (hdr & 0x04) != 0
+	has_size := (hdr & 0x02) != 0
+	p := i + 1 + (has_ext ? 1 : 0)
+	if p > len(data) do return nil, nil, 0, false
+	size := len(data) - p
+	if has_size {
+		val: u64
+		read := 0
+		for j in 0 ..< 8 {
+			if p + j >= len(data) do return nil, nil, 0, false
+			b := data[p + j]
+			val |= u64(b & 0x7F) << uint(j * 7)
+			read += 1
+			if (b & 0x80) == 0 do break
+			if j == 7 do return nil, nil, 0, false
+		}
+		p += read
+		if val > u64(len(data) - p) do return nil, nil, 0, false
+		size = int(val)
+	}
+	end := p + size
+	pos^ = end
+	return data[i:end], data[p:end], obu_type, true
+}
+
+// Parses an AV1 OBU_SEQUENCE_HEADER payload into the 4-byte av1C header.
+parse_av1_seq :: proc(payload: []u8) -> (hdr: [4]u8, ok: bool) {
+	if len(payload) < 3 do return {}, false
+	b := Bits{data = payload}
+	seq_profile := u8(read_bits(&b, 3))
+	if seq_profile > 2 do return {}, false
+	_ = read_bits(&b, 1) // still_picture
+	reduced := read_bits(&b, 1) == 1
+	seq_level_idx_0, seq_tier_0: u8
+	if reduced {
+		seq_level_idx_0 = u8(read_bits(&b, 5))
+	} else {
+		decoder_model_present := false
+		buffer_delay_len := 0
+		if read_bits(&b, 1) == 1 { // timing_info_present_flag
+			_ = read_bits(&b, 32)
+			_ = read_bits(&b, 32)
+			if read_bits(&b, 1) == 1 { // equal_picture_interval
+				zeros := 0
+				for read_bits(&b, 1) == 0 {
+					zeros += 1
+					if zeros >= 32 || b.overrun do return {}, false
+				}
+				if zeros > 0 do _ = read_bits(&b, zeros)
+			}
+			decoder_model_present = read_bits(&b, 1) == 1
+			if decoder_model_present {
+				buffer_delay_len = int(read_bits(&b, 5)) + 1
+				_ = read_bits(&b, 32)
+				_ = read_bits(&b, 10)
+			}
+		}
+		initial_display_delay_present := read_bits(&b, 1) == 1
+		op_cnt := int(read_bits(&b, 5)) + 1
+		for i in 0 ..< op_cnt {
+			_ = read_bits(&b, 12)
+			lvl := u8(read_bits(&b, 5))
+			tier := lvl > 7 ? u8(read_bits(&b, 1)) : 0
+			if i == 0 {
+				seq_level_idx_0 = lvl
+				seq_tier_0 = tier
+			}
+			if decoder_model_present && read_bits(&b, 1) == 1 {
+				b.pos += 3 * buffer_delay_len + 1
+			}
+			if initial_display_delay_present && read_bits(&b, 1) == 1 {
+				_ = read_bits(&b, 4)
+			}
+		}
+	}
+	fw_bits := int(read_bits(&b, 4)) + 1
+	fh_bits := int(read_bits(&b, 4)) + 1
+	_ = read_bits(&b, fw_bits)
+	_ = read_bits(&b, fh_bits)
+	if !reduced && read_bits(&b, 1) == 1 do _ = read_bits(&b, 7)
+	_ = read_bits(&b, 3) // use_128x128_superblock, enable_filter_intra, enable_intra_edge_filter
+	if !reduced {
+		_ = read_bits(&b, 4)
+		order_hint := read_bits(&b, 1) == 1
+		if order_hint do _ = read_bits(&b, 2)
+		force_sct := 2
+		if read_bits(&b, 1) == 0 do force_sct = int(read_bits(&b, 1))
+		if force_sct > 0 && read_bits(&b, 1) == 0 do _ = read_bits(&b, 1)
+		if order_hint do _ = read_bits(&b, 3)
+	}
+	_ = read_bits(&b, 3) // enable_superres, enable_cdef, enable_restoration
+	high_bitdepth := u8(read_bits(&b, 1))
+	twelve_bit := seq_profile == 2 && high_bitdepth != 0 ? u8(read_bits(&b, 1)) : 0
+	bit_depth := twelve_bit != 0 ? 12 : (high_bitdepth != 0 ? 10 : 8)
+	mono_chrome := seq_profile != 1 ? u8(read_bits(&b, 1)) : 0
+	cp, tc, mc: u8 = 2, 2, 2
+	if read_bits(&b, 1) == 1 {
+		cp = u8(read_bits(&b, 8))
+		tc = u8(read_bits(&b, 8))
+		mc = u8(read_bits(&b, 8))
+	}
+	subsampling_x, subsampling_y, chroma_sample_position: u8
+	if mono_chrome != 0 {
+		_ = read_bits(&b, 1)
+		subsampling_x, subsampling_y = 1, 1
+	} else if cp == 1 && tc == 13 && mc == 0 {
+		subsampling_x, subsampling_y = 0, 0
+	} else {
+		_ = read_bits(&b, 1)
+		if seq_profile == 0 {
+			subsampling_x, subsampling_y = 1, 1
+		} else if seq_profile == 1 {
+			subsampling_x, subsampling_y = 0, 0
+		} else if bit_depth == 12 {
+			subsampling_x = u8(read_bits(&b, 1))
+			if subsampling_x != 0 do subsampling_y = u8(read_bits(&b, 1))
+		} else {
+			subsampling_x, subsampling_y = 1, 0
+		}
+		if subsampling_x != 0 && subsampling_y != 0 {
+			chroma_sample_position = u8(read_bits(&b, 2))
+		}
+	}
+	if b.overrun do return {}, false
+	hdr[0] = 0x81
+	hdr[1] = (seq_profile << 5) | (seq_level_idx_0 & 0x1F)
+	hdr[2] = (seq_tier_0 << 7) |
+		(high_bitdepth << 6) |
+		(twelve_bit << 5) |
+		(mono_chrome << 4) |
+		((subsampling_x & 1) << 3) |
+		((subsampling_y & 1) << 2) |
+		(chroma_sample_position & 3)
+	hdr[3] = 0
+	return hdr, true
 }

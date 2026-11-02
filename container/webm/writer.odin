@@ -6,12 +6,14 @@ import "core:math"
 import "core:os"
 import "base:intrinsics"
 
-// Video-only VP9. Timestamps and durations at the API boundary are nanoseconds.
+// Video-only VP9 or AV1. Timestamps and durations at the API boundary are nanoseconds.
 Writer_Config :: struct {
-	width, height: int,
-	alpha: bool,
+	width, height:    int,
+	codec:            Codec, // .Unknown or .VP9 writes V_VP9; .AV1 writes V_AV1
+	codec_private:    []u8,  // Optional CodecPrivate (e.g. av1C for V_AV1)
+	alpha:            bool,
 	default_duration: i64,
-	chapters: []Chapter,
+	chapters:         []Chapter,
 }
 
 Writer :: struct {
@@ -43,8 +45,9 @@ create :: proc(w: ^Writer, path: string, config: Writer_Config) -> Error {
 // Borrows a seekable Write_At stream. Destroy never finishes an incomplete file.
 create_stream :: proc(w: ^Writer, stream: io.Stream, config: Writer_Config) -> Error {
 	if w == nil || config.width <= 0 || config.height <= 0 || config.width > 65536 || config.height > 65536 || config.default_duration < 0 do return .Invalid_Argument
+	if config.codec != .Unknown && config.codec != .VP9 && config.codec != .AV1 do return .Invalid_Argument
 	if !common.validate_chapters(config.chapters) do return .Invalid_Argument
-	extra := 0
+	extra := len(config.codec_private)
 	for c, i in config.chapters {
 		if c.start >= 9e9 do return .Invalid_Argument
 		if i > 0 && u64(math.round(c.start * 1e9)) <= u64(math.round(config.chapters[i - 1].start * 1e9)) {
@@ -83,7 +86,9 @@ create_stream :: proc(w: ^Writer, stream: io.Stream, config: Writer_Config) -> E
 	track := writer_begin(b, 0xAE)
 	writer_uint(b, 0xD7, 1); writer_uint(b, 0x73C5, 1); writer_uint(b, 0x83, 1)
 	writer_uint(b, 0x9C, 0)
-	writer_bytes(b, 0x86, transmute([]u8)string("V_VP9"))
+	codec_id := config.codec == .AV1 ? "V_AV1" : "V_VP9"
+	writer_bytes(b, 0x86, transmute([]u8)codec_id)
+	if len(config.codec_private) > 0 do writer_bytes(b, 0x63A2, config.codec_private)
 	if config.default_duration > 0 do writer_uint(b, 0x23E383, u64(config.default_duration))
 	if config.alpha do writer_uint(b, 0x55EE, 1) // MaxBlockAdditionID
 	video := writer_begin(b, 0xE0)
