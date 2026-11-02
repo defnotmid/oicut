@@ -262,21 +262,31 @@ should_split :: proc(t: ^Tile, r, c, b_size: int, $T: typeid) -> bool #no_bounds
 	hh := ph >> 1
 	s := e.source_strides[0]
 	src := plane_t(e.source[0], T)[py * s + px:]
-	bd_shift := uint((e.bit_depth - 8) * 2)
 
 	if !e.keyframe {
 		rs := e.strides[0]
 		ref_plane := plane_t(e.reference[0], T)
-		dy := int(t.last_mv[0]) >> 3
-		dx := int(t.last_mv[1]) >> 3
 		ref := ref_plane[py * rs + px:]
 		s00 := block_sad(src, s, ref, rs, hw, hh)
-		if (dx != 0 || dy != 0) && px + dx >= 0 && py + dy >= 0 && px + dx + pw <= e.aligned_w[0] && py + dy + ph <= e.aligned_h[0] {
-			mref := ref_plane[(py + dy) * rs + (px + dx):]
-			ms00 := block_sad(src, s, mref, rs, hw, hh)
-			if ms00 < s00 {
-				ref = mref
-				s00 = ms00
+		cand_mvs := [2]av1.Mv{t.last_mv, {0, 0}}
+		num_cands := 1
+		if h.use_ref_frame_mvs {
+			tpl_mv := e.motion_field_mvs[av1.LAST_FRAME][(r >> 1) * (h.mi_cols >> 1) + (c >> 1)]
+			if tpl_mv[0] != -32768 && tpl_mv != t.last_mv {
+				cand_mvs[1] = tpl_mv
+				num_cands = 2
+			}
+		}
+		for ci in 0 ..< num_cands {
+			dy := int(cand_mvs[ci][0]) >> 3
+			dx := int(cand_mvs[ci][1]) >> 3
+			if (dx != 0 || dy != 0) && px + dx >= 0 && py + dy >= 0 && px + dx + pw <= e.aligned_w[0] && py + dy + ph <= e.aligned_h[0] {
+				mref := ref_plane[(py + dy) * rs + (px + dx):]
+				ms00 := block_sad(src, s, mref, rs, hw, hh)
+				if ms00 < s00 {
+					ref = mref
+					s00 = ms00
+				}
 			}
 		}
 		s01 := block_sad(src[hw:], s, ref[hw:], rs, hw, hh)
@@ -290,7 +300,7 @@ should_split :: proc(t: ^Tile, r, c, b_size: int, $T: typeid) -> bool #no_bounds
 		area := u64(hw * hh)
 		noise := (area * q) >> 5
 		if b_size == av1.BLOCK_16X16 {
-			return max_s > min_s * 2 + noise * 2 && max_s > noise * 5
+			return max_s > min_s * 2 + noise && max_s > noise * 3
 		}
 		if b_size == av1.BLOCK_64X64 {
 			return max_s > min_s + (noise >> 2) || max_s > noise
@@ -298,38 +308,30 @@ should_split :: proc(t: ^Tile, r, c, b_size: int, $T: typeid) -> bool #no_bounds
 		return max_s > min_s + (noise >> 1) || max_s > noise * 2
 	}
 
-	qsum: [4]u64
-	qsum2: [4]u64
-	for qy in 0 ..< 2 {
-		for qx in 0 ..< 2 {
-			qi := qy * 2 + qx
-			base := (qy * hh) * s + qx * hw
-			sum, sum2: u64
-			for y := 0; y < hh; y += 2 {
-				row := base + y * s
-				for x := 0; x < hw; x += 2 {
-					v := u64(src[row + x])
-					sum += v
-					sum2 += v * v
-				}
-			}
-			qsum[qi] = sum
-			qsum2[qi] = sum2
-		}
+	p0 := src
+	p1 := src[(hh - 2) * s + hw - 2:]
+	v0 := block_sad(p0, s, src[2 * s:], s, hw, hh)
+	v1 := block_sad(p1, s, src[hh * s + hw - 2:], s, hw, hh)
+	h0 := block_sad(p0, s, src[2:], s, hw, hh)
+	h1 := block_sad(p1, s, src[(hh - 2) * s + hw:], s, hw, hh)
+	v_diff := v0 + v1
+	h_diff := h0 + h1
+	if b_size > av1.BLOCK_32X32 {
+		p2 := src[hw - 2:]
+		p3 := src[(hh - 2) * s:]
+		v2 := block_sad(p2, s, src[2 * s + hw - 2:], s, hw, hh)
+		v3 := block_sad(p3, s, src[hh * s:], s, hw, hh)
+		h2 := block_sad(p2, s, src[hw:], s, hw, hh)
+		h3 := block_sad(p3, s, src[(hh - 2) * s + 2:], s, hw, hh)
+		v_diff += v2 + v3
+		h_diff += h2 + h3
+		q0, q1, q2, q3 := v0 + h0, v1 + h1, v2 + h2, v3 + h3
+		max_q := max(max(q0, q1), max(q2, q3))
+		min_q := min(min(q0, q1), min(q2, q3))
+		return min(v_diff, h_diff) > 0 || max_q > min_q * 2
 	}
-	qn := u64((hw >> 1) * (hh >> 1))
-	n := qn * 4
-	total := qsum[0] + qsum[1] + qsum[2] + qsum[3]
-	total2 := qsum2[0] + qsum2[1] + qsum2[2] + qsum2[3]
-	full_var := (total2 - (total * total) / n) / n
-	sub_var := u64(0)
-	for qi in 0 ..< 4 {
-		sub_var += (qsum2[qi] - (qsum[qi] * qsum[qi]) / qn) / qn
-	}
-	sub_var >>= 2
-	qscale := u64(max(4, e.q_idx >> 1))
-	threshold := (qscale * qscale) >> (b_size == av1.BLOCK_64X64 ? 2 : (b_size == av1.BLOCK_32X32 ? 1 : 0))
-	return full_var > sub_var + (threshold << bd_shift) && full_var > ((threshold * 2) << bd_shift)
+	area := u64(hw * hh) << uint(e.bit_depth - 8)
+	return min(v_diff, h_diff) > area / 2 || max(v0 + h0, v1 + h1) > min(v0 + h0, v1 + h1) * 3 + area
 }
 
 // Section 5.11.6: Encode partition syntax.
@@ -546,14 +548,28 @@ encode_block :: proc(t: ^Tile, r, c, sub_size: int, $T: typeid) {
 	seg_has_ref := seg_feature_active(t, av1.SEG_LVL_REF_FRAME)
 	seg_ref := seg_has_ref ? i8(h.feature_data[t.segment_id][av1.SEG_LVL_REF_FRAME]) : i8(-1)
 
-	// Select prediction mode (intra vs inter) and motion vectors.
-	select_prediction_mode(t, seg_skip, seg_globalmv, seg_has_ref, seg_ref, T)
-
-	// Select transform size.
+	// Select default transform size prior to intra/inter mode search.
 	if t.lossless {
+		t.tx_size = av1.TX_4X4
+	} else if t.mi_size == av1.BLOCK_64X64 {
+		t.tx_size = av1.TX_32X32
+	} else if t.mi_size == av1.BLOCK_8X8 && e.keyframe {
 		t.tx_size = av1.TX_4X4
 	} else {
 		t.tx_size = u8(av1.MAX_TX_SIZE_RECT[t.mi_size])
+	}
+
+	// Select prediction mode (intra vs inter) and motion vectors.
+	select_prediction_mode(t, seg_skip, seg_globalmv, seg_has_ref, seg_ref, T)
+
+	if !t.lossless && !t.is_inter {
+		if t.mi_size == av1.BLOCK_64X64 {
+			t.tx_size = av1.TX_32X32
+		} else if t.mi_size == av1.BLOCK_8X8 && e.keyframe {
+			t.tx_size = av1.TX_4X4
+		} else {
+			t.tx_size = u8(av1.MAX_TX_SIZE_RECT[t.mi_size])
+		}
 	}
 
 	// Populate grid cells prior to inter/intra prediction and transform.
@@ -563,6 +579,42 @@ encode_block :: proc(t: ^Tile, r, c, sub_size: int, $T: typeid) {
 	// Compute inter prediction into `e.planes` if inter.
 	if t.is_inter {
 		compute_inter_prediction(t, T)
+		if !t.lossless && t.mi_size > av1.BLOCK_4X4 {
+			if t.mi_size == av1.BLOCK_64X64 {
+				t.tx_size = av1.TX_32X32
+			} else {
+				px := c * av1.MI_SIZE
+				py := r * av1.MI_SIZE
+				hw := (t.bw4 * av1.MI_SIZE) >> 1
+				hh := (t.bh4 * av1.MI_SIZE) >> 1
+				ss := e.source_strides[0]
+				ps := e.strides[0]
+				src := plane_t(e.source[0], T)[py * ss + px:]
+				prd := plane_t(e.planes[0], T)[py * ps + px:]
+				s00 := block_sad(src, ss, prd, ps, hw, hh)
+				s01 := block_sad(src[hw:], ss, prd[hw:], ps, hw, hh)
+				s10 := block_sad(src[hh * ss:], ss, prd[hh * ps:], ps, hw, hh)
+				s11 := block_sad(src[hh * ss + hw:], ss, prd[hh * ps + hw:], ps, hw, hh)
+				min_s := min(min(s00, s01), min(s10, s11))
+				max_s := max(max(s00, s01), max(s10, s11))
+				q := u64(av1.ac_quant(e.q_idx, 0, e.bit_depth))
+				noise := (u64(hw * hh) * q) >> 5
+				max_tx := u8(av1.MAX_TX_SIZE_RECT[t.mi_size])
+				t.tx_size = (max_s > min_s * 2 + noise) ? av1.SPLIT_TX_SIZE[max_tx] : max_tx
+			}
+			for y in 0 ..< t.bh4 {
+				row := t.mi_row + y
+				if row >= h.mi_rows do break
+				row_base := row * h.mi_cols
+				for x in 0 ..< t.bw4 {
+					col := t.mi_col + x
+					if col >= h.mi_cols do break
+					idx := row_base + col
+					e.tile_cells[idx].inter_tx_size = t.tx_size
+					e.lf_cells[idx].tx_size_y = t.tx_size
+				}
+			}
+		}
 	}
 
 	// Forward transform, quantize, and reconstruct in-loop into `e.planes`.
@@ -572,6 +624,9 @@ encode_block :: proc(t: ^Tile, r, c, sub_size: int, $T: typeid) {
 	spatial_pred, _ := get_spatial_seg_pred(t)
 	can_skip_seg := !(h.segmentation_enabled && h.segmentation_update_map && !e.seg_id_pre_skip && int(t.segment_id) != spatial_pred)
 	t.skip = seg_skip || (!any_nonzero && can_skip_seg)
+	if t.skip && t.is_inter && !t.lossless {
+		t.tx_size = u8(av1.MAX_TX_SIZE_RECT[t.mi_size])
+	}
 
 	// Emit block mode info, transform size, context updates, and residuals.
 	write_mode_info(t)
@@ -588,6 +643,7 @@ encode_block :: proc(t: ^Tile, r, c, sub_size: int, $T: typeid) {
 				idx := row_base + col
 				e.tile_cells[idx].skip = true
 				e.lf_cells[idx].skip_inter = t.is_inter
+				e.lf_cells[idx].tx_size_y = t.tx_size
 			}
 		}
 	} else {
@@ -734,62 +790,163 @@ sad_rows :: #force_inline proc "contextless" ($W: int, h: int, a: []$T, a_stride
 }
 
 @(private)
-choose_intra_y :: proc(t: ^Tile, $T: typeid) -> (best_mode: u8, best_sad: u64) #no_bounds_check {
+choose_intra_y :: proc(t: ^Tile, $T: typeid) -> (best_mode: u8, best_angle: i8, best_sad: u64) #no_bounds_check {
 	e := t.e
 	h := &e.header
 	s := &e.seq
 	px := t.mi_col * av1.MI_SIZE
 	py := t.mi_row * av1.MI_SIZE
-	tx_sz := av1.find_tx_size(t.bw4 * 4, t.bh4 * 4)
-	w := int(av1.TX_WIDTH[tx_sz])
-	bh := int(av1.TX_HEIGHT[tx_sz])
+	bw := t.bw4 * 4
+	bh := t.bh4 * 4
+	tx_sz := int(t.tx_size)
+	tw := int(av1.TX_WIDTH[tx_sz])
+	th := int(av1.TX_HEIGHT[tx_sz])
+	step_x := tw >> 2
+	step_y := th >> 2
 	max_x := h.mi_cols * av1.MI_SIZE - 1
 	max_y := h.mi_rows * av1.MI_SIZE - 1
 	sub_row := t.mi_row & 15
 	sub_col := t.mi_col & 15
-	bd_tr := t.block_decoded[0][sub_row][sub_col + t.bw4 + 1]
-	bd_bl := t.block_decoded[0][sub_row + t.bh4 + 1][sub_col]
-
-	edges := av1.Intra_Edges{
-		have_left                = t.avail_l,
-		have_above               = t.avail_u,
-		have_above_right         = bd_tr,
-		have_below_left          = bd_bl,
-		max_x                    = max_x,
-		max_y                    = max_y,
-		enable_intra_edge_filter = s.enable_intra_edge_filter,
-		filter_type              = get_filter_type(t, 0),
-	}
+	filter_type := get_filter_type(t, 0)
 
 	recon := plane_t(e.planes[0], T)
 	r_stride := e.strides[0]
-	src := plane_t(e.source[0], T)[py * e.source_strides[0] + px:]
+	src_plane := plane_t(e.source[0], T)
 	s_stride := e.source_strides[0]
 
-	base_modes := [5]u8{av1.DC_PRED, av1.V_PRED, av1.H_PRED, av1.SMOOTH_PRED, av1.PAETH_PRED}
-	dir_modes := [8]u8{
-		av1.SMOOTH_V_PRED, av1.SMOOTH_H_PRED,
-		av1.D45_PRED, av1.D135_PRED, av1.D113_PRED, av1.D157_PRED, av1.D203_PRED, av1.D67_PRED,
+	y_cdf: []u16
+	if h.frame_is_intra {
+		above_mode := av1.INTRA_MODE_CONTEXT[t.avail_u ? t.grid.cells[(t.mi_row - 1) * t.grid.mi_cols + t.mi_col].y_mode : av1.DC_PRED]
+		left_mode := av1.INTRA_MODE_CONTEXT[t.avail_l ? t.grid.cells[t.mi_row * t.grid.mi_cols + (t.mi_col - 1)].y_mode : av1.DC_PRED]
+		y_cdf = t.cdfs.intra_frame_y_mode_cdf[above_mode][left_mode][:]
+	} else {
+		y_cdf = t.cdfs.y_mode_cdf[av1.SIZE_GROUP[t.mi_size]][:]
 	}
-	n_base := e.config.ultrafast ? 4 : 5
+	q := u64(max(4, int(av1.ac_quant(e.q_idx, 0, e.bit_depth))))
+
+	fast_modes := [4]u8{av1.DC_PRED, av1.V_PRED, av1.H_PRED, av1.SMOOTH_PRED}
+	num_modes := e.config.ultrafast ? 4 : av1.INTRA_MODES
 
 	best_mode = av1.DC_PRED
+	best_angle = 0
 	best_sad = max(u64)
-	for mode in base_modes[:n_base] {
-		av1.predict_intra(recon, r_stride, px, py, tx_sz, int(mode), edges, e.bit_depth)
-		sad := block_sad(src, s_stride, recon[py * r_stride + px:], r_stride, w, bh)
-		if sad < best_sad {
+	best_cost := max(u64)
+
+	for idx in 0 ..< num_modes {
+		mode := e.config.ultrafast ? fast_modes[idx] : u8(idx)
+		bits := u64(av1.symbol_cost(y_cdf, int(mode)))
+		if t.mi_size >= av1.BLOCK_8X8 && av1.is_directional_mode(int(mode)) {
+			bits += u64(av1.symbol_cost(t.cdfs.angle_delta_cdf[mode - av1.V_PRED][:], av1.MAX_ANGLE_DELTA))
+		}
+		rate_cost := (q * bits) >> 11
+		sad := u64(0)
+		if tw < bw || th < bh {
+			for dy := 0; dy < bh; dy += th {
+				for dx := 0; dx < bw; dx += tw {
+					sx, sy := px + dx, py + dy
+					if sx > max_x || sy > max_y do continue
+					x4, y4 := dx >> 2, dy >> 2
+					bd_tr := dy == 0 ? t.block_decoded[0][sub_row][sub_col + x4 + step_x + 1] : (dx + tw < bw)
+					bd_bl := dx == 0 ? t.block_decoded[0][sub_row + y4 + step_y + 1][sub_col] : false
+					edges := av1.Intra_Edges{
+						have_left                = t.avail_l || dx > 0,
+						have_above               = t.avail_u || dy > 0,
+						have_above_right         = bd_tr,
+						have_below_left          = bd_bl,
+						max_x                    = max_x,
+						max_y                    = max_y,
+						enable_intra_edge_filter = s.enable_intra_edge_filter,
+						filter_type              = filter_type,
+						angle_delta              = 0,
+					}
+					av1.predict_intra(recon, r_stride, sx, sy, tx_sz, int(mode), edges, e.bit_depth)
+					sad += block_sad(src_plane[sy * s_stride + sx:], s_stride, recon[sy * r_stride + sx:], r_stride, tw, th)
+					for yy in 0 ..< th {
+						copy(recon[(sy + yy) * r_stride + sx:][:tw], src_plane[(sy + yy) * s_stride + sx:][:tw])
+					}
+				}
+			}
+		} else {
+			bd_tr := t.block_decoded[0][sub_row][sub_col + t.bw4 + 1]
+			bd_bl := t.block_decoded[0][sub_row + t.bh4 + 1][sub_col]
+			edges := av1.Intra_Edges{
+				have_left                = t.avail_l,
+				have_above               = t.avail_u,
+				have_above_right         = bd_tr,
+				have_below_left          = bd_bl,
+				max_x                    = max_x,
+				max_y                    = max_y,
+				enable_intra_edge_filter = s.enable_intra_edge_filter,
+				filter_type              = filter_type,
+				angle_delta              = 0,
+			}
+			av1.predict_intra(recon, r_stride, px, py, tx_sz, int(mode), edges, e.bit_depth)
+			sad = block_sad(src_plane[py * s_stride + px:], s_stride, recon[py * r_stride + px:], r_stride, tw, th)
+		}
+		cost := sad + rate_cost
+		if cost < best_cost {
+			best_cost = cost
 			best_sad = sad
 			best_mode = mode
 		}
 	}
-	if !e.config.ultrafast && best_sad > (u64(w * bh) << uint(e.bit_depth - 8)) {
-		for mode in dir_modes {
-			av1.predict_intra(recon, r_stride, px, py, tx_sz, int(mode), edges, e.bit_depth)
-			sad := block_sad(src, s_stride, recon[py * r_stride + px:], r_stride, w, bh)
-			if sad < best_sad {
+
+	if !e.config.ultrafast && t.mi_size >= av1.BLOCK_8X8 && av1.is_directional_mode(int(best_mode)) && best_sad > (u64(bw * bh) << uint(e.bit_depth - 8)) {
+		mode_bits := u64(av1.symbol_cost(y_cdf, int(best_mode)))
+		acdf := t.cdfs.angle_delta_cdf[best_mode - av1.V_PRED][:]
+		for delta in -av1.MAX_ANGLE_DELTA ..= av1.MAX_ANGLE_DELTA {
+			if delta == 0 do continue
+			bits := mode_bits + u64(av1.symbol_cost(acdf, delta + av1.MAX_ANGLE_DELTA))
+			rate_cost := (q * bits) >> 11
+			sad := u64(0)
+			if tw < bw || th < bh {
+				for dy := 0; dy < bh; dy += th {
+					for dx := 0; dx < bw; dx += tw {
+						sx, sy := px + dx, py + dy
+						if sx > max_x || sy > max_y do continue
+						x4, y4 := dx >> 2, dy >> 2
+						bd_tr := dy == 0 ? t.block_decoded[0][sub_row][sub_col + x4 + step_x + 1] : (dx + tw < bw)
+						bd_bl := dx == 0 ? t.block_decoded[0][sub_row + y4 + step_y + 1][sub_col] : false
+						edges := av1.Intra_Edges{
+							have_left                = t.avail_l || dx > 0,
+							have_above               = t.avail_u || dy > 0,
+							have_above_right         = bd_tr,
+							have_below_left          = bd_bl,
+							max_x                    = max_x,
+							max_y                    = max_y,
+							enable_intra_edge_filter = s.enable_intra_edge_filter,
+							filter_type              = filter_type,
+							angle_delta              = delta,
+						}
+						av1.predict_intra(recon, r_stride, sx, sy, tx_sz, int(best_mode), edges, e.bit_depth)
+						sad += block_sad(src_plane[sy * s_stride + sx:], s_stride, recon[sy * r_stride + sx:], r_stride, tw, th)
+						for yy in 0 ..< th {
+							copy(recon[(sy + yy) * r_stride + sx:][:tw], src_plane[(sy + yy) * s_stride + sx:][:tw])
+						}
+					}
+				}
+			} else {
+				bd_tr := t.block_decoded[0][sub_row][sub_col + t.bw4 + 1]
+				bd_bl := t.block_decoded[0][sub_row + t.bh4 + 1][sub_col]
+				edges := av1.Intra_Edges{
+					have_left                = t.avail_l,
+					have_above               = t.avail_u,
+					have_above_right         = bd_tr,
+					have_below_left          = bd_bl,
+					max_x                    = max_x,
+					max_y                    = max_y,
+					enable_intra_edge_filter = s.enable_intra_edge_filter,
+					filter_type              = filter_type,
+					angle_delta              = delta,
+				}
+				av1.predict_intra(recon, r_stride, px, py, tx_sz, int(best_mode), edges, e.bit_depth)
+				sad = block_sad(src_plane[py * s_stride + px:], s_stride, recon[py * r_stride + px:], r_stride, tw, th)
+			}
+			cost := sad + rate_cost
+			if cost < best_cost {
+				best_cost = cost
 				best_sad = sad
-				best_mode = mode
+				best_angle = i8(delta)
 			}
 		}
 	}
@@ -797,62 +954,210 @@ choose_intra_y :: proc(t: ^Tile, $T: typeid) -> (best_mode: u8, best_sad: u64) #
 }
 
 @(private)
-choose_intra_uv :: proc(t: ^Tile, $T: typeid) -> u8 #no_bounds_check {
+choose_intra_uv :: proc(t: ^Tile, $T: typeid) #no_bounds_check {
 	e := t.e
 	h := &e.header
 	s := &e.seq
+	t.uv_mode = av1.DC_PRED
+	t.angle_delta_uv = 0
+	t.cfl_alpha_u = 0
+	t.cfl_alpha_v = 0
+	if e.config.ultrafast || t.lossless do return
+
 	sub_x := uint(e.ss_x)
 	sub_y := uint(e.ss_y)
 	px := (t.mi_col >> sub_x) * av1.MI_SIZE
 	py := (t.mi_row >> sub_y) * av1.MI_SIZE
+	max_x := ((h.mi_cols * av1.MI_SIZE) >> sub_x) - 1
+	max_y := ((h.mi_rows * av1.MI_SIZE) >> sub_y) - 1
+	if px > max_x || py > max_y do return
+
 	plane_sz := av1.get_plane_residual_size(t.mi_size, 1, sub_x, sub_y)
 	nw4 := int(av1.NUM_4X4_BLOCKS_WIDE[plane_sz])
 	nh4 := int(av1.NUM_4X4_BLOCKS_HIGH[plane_sz])
-	tx_sz := av1.find_tx_size(nw4 * 4, nh4 * 4)
-	w := int(av1.TX_WIDTH[tx_sz])
-	bh := int(av1.TX_HEIGHT[tx_sz])
-	max_x := ((h.mi_cols * av1.MI_SIZE) >> sub_x) - 1
-	max_y := ((h.mi_rows * av1.MI_SIZE) >> sub_y) - 1
+	bw := nw4 * 4
+	bh := nh4 * 4
+	tx_sz := av1.get_uv_tx_size(t.mi_size, 1, int(t.tx_size), t.lossless, u8(e.ss_x), u8(e.ss_y))
+	tw := int(av1.TX_WIDTH[tx_sz])
+	th := int(av1.TX_HEIGHT[tx_sz])
+	step_x := tw >> 2
+	step_y := th >> 2
 	sub_row := (t.mi_row & 15) >> sub_y
 	sub_col := (t.mi_col & 15) >> sub_x
-	bd_tr := t.block_decoded[1][sub_row][sub_col + nw4 + 1]
-	bd_bl := t.block_decoded[1][sub_row + nh4 + 1][sub_col]
-
-	edges := av1.Intra_Edges{
-		have_left                = t.avail_l_chroma,
-		have_above               = t.avail_u_chroma,
-		have_above_right         = bd_tr,
-		have_below_left          = bd_bl,
-		max_x                    = max_x,
-		max_y                    = max_y,
-		enable_intra_edge_filter = s.enable_intra_edge_filter,
-		filter_type              = get_filter_type(t, 1),
-	}
+	filter_type := get_filter_type(t, 1)
 
 	u_recon := plane_t(e.planes[1], T)
 	v_recon := plane_t(e.planes[2], T)
 	r_stride := e.strides[1]
-	u_src := plane_t(e.source[1], T)[py * e.source_strides[1] + px:]
-	v_src := plane_t(e.source[2], T)[py * e.source_strides[2] + px:]
+	u_src := plane_t(e.source[1], T)
+	v_src := plane_t(e.source[2], T)
 	s_stride := e.source_strides[1]
 
-	uv_modes := [5]u8{av1.DC_PRED, av1.V_PRED, av1.H_PRED, av1.SMOOTH_PRED, av1.PAETH_PRED}
-	modes := e.config.ultrafast ? uv_modes[:2] : uv_modes[:]
+	cfl_ok := is_cfl_allowed(t)
+	uv_cdf := cfl_ok ? t.cdfs.uv_mode_cfl_allowed_cdf[t.y_mode][:] : t.cdfs.uv_mode_cfl_not_allowed_cdf[t.y_mode][:]
+	q := u64(max(4, int(av1.ac_quant(e.q_idx, h.delta_q_u_ac, e.bit_depth))))
 
 	best_mode := u8(av1.DC_PRED)
-	best_sad := max(u64)
-	for mode in modes {
-		m := mode == av1.DC_PRED ? u8(av1.DC_PRED) : mode
-		av1.predict_intra(u_recon, r_stride, px, py, tx_sz, int(m), edges, e.bit_depth)
-		av1.predict_intra(v_recon, r_stride, px, py, tx_sz, int(m), edges, e.bit_depth)
-		sad := block_sad(u_src, s_stride, u_recon[py * r_stride + px:], r_stride, w, bh) +
-			block_sad(v_src, s_stride, v_recon[py * r_stride + px:], r_stride, w, bh)
-		if sad < best_sad {
-			best_sad = sad
-			best_mode = m
+	best_cost := max(u64)
+
+	for m in 0 ..< av1.INTRA_MODES {
+		mode := u8(m)
+		bits := u64(av1.symbol_cost(uv_cdf, m))
+		if t.mi_size >= av1.BLOCK_8X8 && av1.is_directional_mode(m) {
+			bits += u64(av1.symbol_cost(t.cdfs.angle_delta_cdf[m - av1.V_PRED][:], av1.MAX_ANGLE_DELTA))
+		}
+		rate_cost := (q * bits) >> 11
+		sad := u64(0)
+		if tw < bw || th < bh {
+			for dy := 0; dy < bh; dy += th {
+				for dx := 0; dx < bw; dx += tw {
+					sx, sy := px + dx, py + dy
+					if sx > max_x || sy > max_y do continue
+					x4, y4 := dx >> 2, dy >> 2
+					bd_tr := dy == 0 ? t.block_decoded[1][sub_row][sub_col + x4 + step_x + 1] : (dx + tw < bw)
+					bd_bl := dx == 0 ? t.block_decoded[1][sub_row + y4 + step_y + 1][sub_col] : false
+					edges := av1.Intra_Edges{
+						have_left                = t.avail_l_chroma || dx > 0,
+						have_above               = t.avail_u_chroma || dy > 0,
+						have_above_right         = bd_tr,
+						have_below_left          = bd_bl,
+						max_x                    = max_x,
+						max_y                    = max_y,
+						enable_intra_edge_filter = s.enable_intra_edge_filter,
+						filter_type              = filter_type,
+					}
+					av1.predict_intra(u_recon, r_stride, sx, sy, tx_sz, m, edges, e.bit_depth)
+					av1.predict_intra(v_recon, r_stride, sx, sy, tx_sz, m, edges, e.bit_depth)
+					sad += block_sad(u_src[sy * s_stride + sx:], s_stride, u_recon[sy * r_stride + sx:], r_stride, tw, th) +
+						block_sad(v_src[sy * s_stride + sx:], s_stride, v_recon[sy * r_stride + sx:], r_stride, tw, th)
+					for yy in 0 ..< th {
+						copy(u_recon[(sy + yy) * r_stride + sx:][:tw], u_src[(sy + yy) * s_stride + sx:][:tw])
+						copy(v_recon[(sy + yy) * r_stride + sx:][:tw], v_src[(sy + yy) * s_stride + sx:][:tw])
+					}
+				}
+			}
+		} else {
+			bd_tr := t.block_decoded[1][sub_row][sub_col + nw4 + 1]
+			bd_bl := t.block_decoded[1][sub_row + nh4 + 1][sub_col]
+			edges := av1.Intra_Edges{
+				have_left                = t.avail_l_chroma,
+				have_above               = t.avail_u_chroma,
+				have_above_right         = bd_tr,
+				have_below_left          = bd_bl,
+				max_x                    = max_x,
+				max_y                    = max_y,
+				enable_intra_edge_filter = s.enable_intra_edge_filter,
+				filter_type              = filter_type,
+			}
+			av1.predict_intra(u_recon, r_stride, px, py, tx_sz, m, edges, e.bit_depth)
+			av1.predict_intra(v_recon, r_stride, px, py, tx_sz, m, edges, e.bit_depth)
+			sad = block_sad(u_src[py * s_stride + px:], s_stride, u_recon[py * r_stride + px:], r_stride, tw, th) +
+				block_sad(v_src[py * s_stride + px:], s_stride, v_recon[py * r_stride + px:], r_stride, tw, th)
+		}
+		cost := sad + rate_cost
+		if cost < best_cost {
+			best_cost = cost
+			best_mode = mode
 		}
 	}
-	return best_mode
+
+	if cfl_ok && tw == bw && th == bh {
+		bd_tr := t.block_decoded[1][sub_row][sub_col + nw4 + 1]
+		bd_bl := t.block_decoded[1][sub_row + nh4 + 1][sub_col]
+		edges := av1.Intra_Edges{
+			have_left                = t.avail_l_chroma,
+			have_above               = t.avail_u_chroma,
+			have_above_right         = bd_tr,
+			have_below_left          = bd_bl,
+			max_x                    = max_x,
+			max_y                    = max_y,
+			enable_intra_edge_filter = s.enable_intra_edge_filter,
+			filter_type              = filter_type,
+		}
+		av1.predict_intra(u_recon, r_stride, px, py, tx_sz, av1.DC_PRED, edges, e.bit_depth)
+		av1.predict_intra(v_recon, r_stride, px, py, tx_sz, av1.DC_PRED, edges, e.bit_depth)
+
+		luma_plane := plane_t(e.planes[0], T)
+		luma_stride := e.strides[0]
+		log2_w := uint(av1.TX_WIDTH_LOG2[tx_sz])
+		log2_h := uint(av1.TX_HEIGHT_LOG2[tx_sz])
+		shift_q3 := uint(3 - sub_x - sub_y)
+		l_q3: [32 * 32]i16 = ---
+		luma_avg := i32(0)
+		for i in 0 ..< th {
+			luma_y := min((py + i) << sub_y, t.max_luma_h - (1 << sub_y))
+			for j in 0 ..< tw {
+				luma_x := min((px + j) << sub_x, t.max_luma_w - (1 << sub_x))
+				sum_l := i32(0)
+				for dy in 0 ..= int(sub_y) {
+					lrow := luma_plane[(luma_y + dy) * luma_stride + luma_x:]
+					for dx in 0 ..= int(sub_x) {
+						sum_l += i32(lrow[dx])
+					}
+				}
+				v := sum_l << shift_q3
+				l_q3[i * tw + j] = i16(v)
+				luma_avg += v
+			}
+		}
+		luma_avg = av1.round2(i64(luma_avg), log2_w + log2_h)
+
+		sum_ll := i64(0)
+		sum_lu := i64(0)
+		sum_lv := i64(0)
+		for i in 0 ..< th {
+			urow := u_recon[(py + i) * r_stride + px:]
+			vrow := v_recon[(py + i) * r_stride + px:]
+			us := u_src[(py + i) * s_stride + px:]
+			vs := v_src[(py + i) * s_stride + px:]
+			for j in 0 ..< tw {
+				dl := i64(i32(l_q3[i * tw + j]) - luma_avg)
+				du := i64(i32(us[j]) - i32(urow[j]))
+				dv := i64(i32(vs[j]) - i32(vrow[j]))
+				sum_ll += dl * dl
+				sum_lu += dl * du
+				sum_lv += dl * dv
+			}
+		}
+		if sum_ll > 0 {
+			au := int(clamp((sum_lu * 64 + (sum_lu >= 0 ? sum_ll / 2 : -sum_ll / 2)) / sum_ll, -16, 16))
+			av := int(clamp((sum_lv * 64 + (sum_lv >= 0 ? sum_ll / 2 : -sum_ll / 2)) / sum_ll, -16, 16))
+			if au != 0 || av != 0 {
+				sign_u := au < 0 ? 1 : (au > 0 ? 2 : 0)
+				sign_v := av < 0 ? 1 : (av > 0 ? 2 : 0)
+				cfl_bits := u64(av1.symbol_cost(uv_cdf, av1.UV_CFL_PRED))
+				cfl_bits += u64(av1.symbol_cost(t.cdfs.cfl_sign_cdf[:], sign_u * 3 + sign_v - 1))
+				if sign_u != 0 {
+					cfl_bits += u64(av1.symbol_cost(t.cdfs.cfl_alpha_cdf[(sign_u - 1) * 3 + sign_v][:], abs(au) - 1))
+				}
+				if sign_v != 0 {
+					cfl_bits += u64(av1.symbol_cost(t.cdfs.cfl_alpha_cdf[(sign_v - 1) * 3 + sign_u][:], abs(av) - 1))
+				}
+				av1.predict_chroma_from_luma(u_recon, r_stride, luma_plane, luma_stride, px, py, tx_sz, au, sub_x, sub_y, t.max_luma_w, t.max_luma_h, e.bit_depth)
+				av1.predict_chroma_from_luma(v_recon, r_stride, luma_plane, luma_stride, px, py, tx_sz, av, sub_x, sub_y, t.max_luma_w, t.max_luma_h, e.bit_depth)
+				cfl_sad := block_sad(u_src[py * s_stride + px:], s_stride, u_recon[py * r_stride + px:], r_stride, tw, th) +
+					block_sad(v_src[py * s_stride + px:], s_stride, v_recon[py * r_stride + px:], r_stride, tw, th)
+				cfl_cost := cfl_sad + ((q * cfl_bits) >> 11)
+				if cfl_cost < best_cost {
+					best_cost = cfl_cost
+					best_mode = av1.UV_CFL_PRED
+					t.cfl_alpha_u = i16(au)
+					t.cfl_alpha_v = i16(av)
+				}
+			}
+		}
+	}
+
+	t.uv_mode = best_mode
+	for y in 0 ..< t.bh4 {
+		row := t.mi_row + y
+		if row >= h.mi_rows do break
+		for x in 0 ..< t.bw4 {
+			col := t.mi_col + x
+			if col >= h.mi_cols do break
+			e.tile_cells[row * h.mi_cols + col].uv_mode = best_mode
+		}
+	}
 }
 
 @(private)
@@ -904,17 +1209,183 @@ eval_inter_mv :: proc(
 }
 
 @(private)
-mv_diff_bits :: #force_inline proc "contextless" (dr, dc: i16) -> u64 {
-	bits := u64(2)
-	if dr != 0 {
-		v := u32(abs(int(dr)))
-		bits += u64(3 + (32 - intrinsics.count_leading_zeros(v)) * 2)
+eval_compound_mv :: proc(
+	t: ^Tile,
+	rp0, rp1: ^av1.Ref_Plane($T),
+	mv0, mv1: av1.Mv,
+	filter: int,
+	pred_buf: []T,
+	preds: ^[2][64 * 64]i32,
+	src: []T,
+	s_stride: int,
+	px, py, w, bh: int,
+) -> u64 #no_bounds_check {
+	e := t.e
+	h := &e.header
+	cmv0 := av1.Mv{
+		av1.clamp_mv_row(i32(mv0[0]), t.mi_row, h.mi_rows, t.bh4, av1.MV_BORDER + t.bh4 * 32),
+		av1.clamp_mv_col(i32(mv0[1]), t.mi_col, h.mi_cols, t.bw4, av1.MV_BORDER + t.bw4 * 32),
 	}
-	if dc != 0 {
-		v := u32(abs(int(dc)))
-		bits += u64(3 + (32 - intrinsics.count_leading_zeros(v)) * 2)
+	cmv1 := av1.Mv{
+		av1.clamp_mv_row(i32(mv1[0]), t.mi_row, h.mi_rows, t.bh4, av1.MV_BORDER + t.bh4 * 32),
+		av1.clamp_mv_col(i32(mv1[1]), t.mi_col, h.mi_cols, t.bw4, av1.MV_BORDER + t.bw4 * 32),
+	}
+	sx0, sy0, stx0, sty0 := av1.scale_mv_for_block(px, py, cmv0, 0, 0, h.frame_width, h.frame_height, h.upscaled_width, h.frame_height)
+	sx1, sy1, stx1, sty1 := av1.scale_mv_for_block(px, py, cmv1, 0, 0, h.frame_width, h.frame_height, h.upscaled_width, h.frame_height)
+	av1.convolve_2d_pred(preds[0][:], w, rp0, sx0, sy0, stx0, sty0, w, bh, filter, filter, true, e.bit_depth)
+	av1.convolve_2d_pred(preds[1][:], w, rp1, sx1, sy1, stx1, sty1, w, bh, filter, filter, true, e.bit_depth)
+	av1.blend_compound_average(pred_buf, w, 0, 0, w, bh, preds[0][:], preds[1][:], w, e.bit_depth)
+	return block_sad(src, s_stride, pred_buf, w, w, bh)
+}
+
+@(private)
+ref_frame_cost_256 :: proc(t: ^Tile, rf0, rf1: i8) -> u64 #no_bounds_check {
+	h := &t.e.header
+	left_ref_frame := [2]i8{av1.INTRA_FRAME, av1.NONE}
+	left_intra := true
+	left_single := true
+	if t.avail_l {
+		l_idx := t.mi_row * h.mi_cols + (t.mi_col - 1)
+		left_ref_frame = t.grid.cells[l_idx].ref_frames
+		left_intra = left_ref_frame[0] <= av1.INTRA_FRAME
+		left_single = left_ref_frame[1] <= av1.INTRA_FRAME
+	}
+	above_ref_frame := [2]i8{av1.INTRA_FRAME, av1.NONE}
+	above_intra := true
+	above_single := true
+	if t.avail_u {
+		u_idx := (t.mi_row - 1) * h.mi_cols + t.mi_col
+		above_ref_frame = t.grid.cells[u_idx].ref_frames
+		above_intra = above_ref_frame[0] <= av1.INTRA_FRAME
+		above_single = above_ref_frame[1] <= av1.INTRA_FRAME
+	}
+
+	is_compound := rf1 > av1.INTRA_FRAME
+	bits := u64(0)
+	if h.reference_select && min(av1.BLOCK_WIDTH[t.mi_size], av1.BLOCK_HEIGHT[t.mi_size]) >= 8 {
+		ctx := get_comp_mode_ctx(t.avail_u, t.avail_l, above_ref_frame, left_ref_frame, above_intra, left_intra, above_single, left_single)
+		bits += u64(av1.symbol_cost(t.cdfs.comp_mode_cdf[ctx][:], is_compound ? av1.COMPOUND_REFERENCE : av1.SINGLE_REFERENCE))
+	}
+
+	count_refs :: #force_inline proc "contextless" (avail_u, avail_l: bool, above_rf, left_rf: [2]i8, ft: i8) -> int {
+		c := 0
+		if avail_u {
+			if above_rf[0] == ft do c += 1
+			if above_rf[1] == ft do c += 1
+		}
+		if avail_l {
+			if left_rf[0] == ft do c += 1
+			if left_rf[1] == ft do c += 1
+		}
+		return c
+	}
+	ref_count_ctx :: #force_inline proc "contextless" (c0, c1: int) -> int {
+		return c0 < c1 ? 0 : (c0 == c1 ? 1 : 2)
+	}
+
+	c_last := count_refs(t.avail_u, t.avail_l, above_ref_frame, left_ref_frame, av1.LAST_FRAME)
+	c_last2 := count_refs(t.avail_u, t.avail_l, above_ref_frame, left_ref_frame, av1.LAST2_FRAME)
+	c_last3 := count_refs(t.avail_u, t.avail_l, above_ref_frame, left_ref_frame, av1.LAST3_FRAME)
+	c_gold := count_refs(t.avail_u, t.avail_l, above_ref_frame, left_ref_frame, av1.GOLDEN_FRAME)
+	c_bwd := count_refs(t.avail_u, t.avail_l, above_ref_frame, left_ref_frame, av1.BWDREF_FRAME)
+	c_arf2 := count_refs(t.avail_u, t.avail_l, above_ref_frame, left_ref_frame, av1.ALTREF2_FRAME)
+	c_arf := count_refs(t.avail_u, t.avail_l, above_ref_frame, left_ref_frame, av1.ALTREF_FRAME)
+
+	ctx_last12_vs_last3gold := ref_count_ctx(c_last + c_last2, c_last3 + c_gold)
+	ctx_last_vs_last2 := ref_count_ctx(c_last, c_last2)
+	ctx_last3_vs_gold := ref_count_ctx(c_last3, c_gold)
+	ctx_brfarf2_vs_arf := ref_count_ctx(c_bwd + c_arf2, c_arf)
+	ctx_fwd_vs_bwd := ref_count_ctx(c_last + c_last2 + c_last3 + c_gold, c_bwd + c_arf2 + c_arf)
+	ctx_last2_vs_last3gold := ref_count_ctx(c_last2, c_last3 + c_gold)
+
+	if is_compound {
+		ctx_crt := get_comp_ref_type_ctx(t.avail_u, t.avail_l, above_ref_frame, left_ref_frame, above_intra, left_intra, above_single, left_single)
+		if rf1 == av1.GOLDEN_FRAME {
+			bits += u64(av1.symbol_cost(t.cdfs.comp_ref_type_cdf[ctx_crt][:], av1.UNIDIR_COMP_REFERENCE))
+			bits += u64(av1.symbol_cost(t.cdfs.uni_comp_ref_cdf[ctx_fwd_vs_bwd][0][:], 0))
+			bits += u64(av1.symbol_cost(t.cdfs.uni_comp_ref_cdf[ctx_last2_vs_last3gold][1][:], 1))
+			bits += u64(av1.symbol_cost(t.cdfs.uni_comp_ref_cdf[ctx_last3_vs_gold][2][:], 1))
+		} else {
+			bits += u64(av1.symbol_cost(t.cdfs.comp_ref_type_cdf[ctx_crt][:], av1.BIDIR_COMP_REFERENCE))
+			if rf0 == av1.LAST_FRAME {
+				bits += u64(av1.symbol_cost(t.cdfs.comp_ref_cdf[ctx_last12_vs_last3gold][0][:], 0))
+				bits += u64(av1.symbol_cost(t.cdfs.comp_ref_cdf[ctx_last_vs_last2][1][:], 0))
+			} else {
+				bits += u64(av1.symbol_cost(t.cdfs.comp_ref_cdf[ctx_last12_vs_last3gold][0][:], 1))
+				bits += u64(av1.symbol_cost(t.cdfs.comp_ref_cdf[ctx_last3_vs_gold][2][:], 1))
+			}
+			bits += u64(av1.symbol_cost(t.cdfs.comp_bwd_ref_cdf[ctx_brfarf2_vs_arf][0][:], 1))
+		}
+	} else {
+		if rf0 == av1.ALTREF_FRAME {
+			bits += u64(av1.symbol_cost(t.cdfs.single_ref_cdf[ctx_fwd_vs_bwd][0][:], 1))
+			bits += u64(av1.symbol_cost(t.cdfs.single_ref_cdf[ctx_brfarf2_vs_arf][1][:], 1))
+		} else if rf0 == av1.GOLDEN_FRAME {
+			bits += u64(av1.symbol_cost(t.cdfs.single_ref_cdf[ctx_fwd_vs_bwd][0][:], 0))
+			bits += u64(av1.symbol_cost(t.cdfs.single_ref_cdf[ctx_last12_vs_last3gold][2][:], 1))
+			bits += u64(av1.symbol_cost(t.cdfs.single_ref_cdf[ctx_last3_vs_gold][4][:], 1))
+		} else {
+			bits += u64(av1.symbol_cost(t.cdfs.single_ref_cdf[ctx_fwd_vs_bwd][0][:], 0))
+			bits += u64(av1.symbol_cost(t.cdfs.single_ref_cdf[ctx_last12_vs_last3gold][2][:], 0))
+			bits += u64(av1.symbol_cost(t.cdfs.single_ref_cdf[ctx_last_vs_last2][3][:], 0))
+		}
 	}
 	return bits
+}
+
+@(private)
+mv_component_cost_256 :: #force_inline proc "contextless" (t: ^Tile, mv_ctx, comp: int, diff: i16) -> u64 #no_bounds_check {
+	h := &t.e.header
+	sign := diff < 0 ? 1 : 0
+	v := int(abs(diff)) - 1
+	hp := v & 1
+	fr := (v >> 1) & 3
+	offset := v >> 3
+
+	cost := u64(av1.symbol_cost(t.cdfs.mv_sign_cdf[mv_ctx][comp][:], sign))
+	if offset < av1.CLASS0_SIZE {
+		cost += u64(av1.symbol_cost(t.cdfs.mv_class_cdf[mv_ctx][comp][:], 0))
+		cost += u64(av1.symbol_cost(t.cdfs.mv_class0_bit_cdf[mv_ctx][comp][:], offset))
+		if !h.force_integer_mv {
+			cost += u64(av1.symbol_cost(t.cdfs.mv_class0_fr_cdf[mv_ctx][comp][offset][:], fr))
+		}
+		if h.allow_high_precision_mv {
+			cost += u64(av1.symbol_cost(t.cdfs.mv_class0_hp_cdf[mv_ctx][comp][:], hp))
+		}
+	} else {
+		mv_class := int(31 - intrinsics.count_leading_zeros(u32(offset)))
+		if mv_class >= av1.MV_CLASSES {
+			return 1 << 20
+		}
+		bits := offset - (av1.CLASS0_SIZE << uint(mv_class - 1))
+		cost += u64(av1.symbol_cost(t.cdfs.mv_class_cdf[mv_ctx][comp][:], mv_class))
+		for i in 0 ..< mv_class {
+			cost += u64(av1.symbol_cost(t.cdfs.mv_bit_cdf[mv_ctx][comp][i][:], (bits >> uint(i)) & 1))
+		}
+		if !h.force_integer_mv {
+			cost += u64(av1.symbol_cost(t.cdfs.mv_fr_cdf[mv_ctx][comp][:], fr))
+		}
+		if h.allow_high_precision_mv {
+			cost += u64(av1.symbol_cost(t.cdfs.mv_hp_cdf[mv_ctx][comp][:], hp))
+		}
+	}
+	return cost
+}
+
+@(private)
+mv_cost_256 :: #force_inline proc "contextless" (t: ^Tile, mv, pred_mv: av1.Mv) -> u64 #no_bounds_check {
+	mv_ctx := 0
+	diff_r := mv[0] - pred_mv[0]
+	diff_c := mv[1] - pred_mv[1]
+	mv_joint := (diff_r != 0 ? 2 : 0) | (diff_c != 0 ? 1 : 0)
+	cost := u64(av1.symbol_cost(t.cdfs.mv_joint_cdf[mv_ctx][:], mv_joint))
+	if diff_r != 0 {
+		cost += mv_component_cost_256(t, mv_ctx, 0, diff_r)
+	}
+	if diff_c != 0 {
+		cost += mv_component_cost_256(t, mv_ctx, 1, diff_c)
+	}
+	return cost
 }
 
 @(private)
@@ -931,12 +1402,14 @@ search_ref_motion :: proc(
 		sign_bias_u8[i] = u8(h.ref_frame_sign_bias[i])
 	}
 	rf_pair := [2]i8{ref_frame, av1.NONE}
+	t.ref_frame = rf_pair
+	mf_ptr: ^[av1.TOTAL_REFS_PER_FRAME][]av1.Mv = h.use_ref_frame_mvs ? &e.motion_field_mvs : nil
 	av1.find_mv_stack(
 		&t.mv_stack, &t.grid,
 		t.mi_row, t.mi_col, t.mi_size,
 		rf_pair, false,
 		h.allow_high_precision_mv, h.force_integer_mv,
-		false, nil,
+		h.use_ref_frame_mvs, mf_ptr,
 		h.gm_type, h.gm_params, sign_bias_u8,
 	)
 
@@ -951,8 +1424,24 @@ search_ref_motion :: proc(
 	pred_buf: [64 * 64]T = ---
 	bd_shift := uint(e.bit_depth - 8)
 	ac_q := int(av1.ac_quant(e.q_idx, 0, e.bit_depth))
-	bit_pen := u64(max(1 << bd_shift, ac_q >> 4))
-	mode_pen := bit_pen * 2
+	rate_q := u64(max(16 << bd_shift, ac_q))
+
+	filt_ctx := get_interp_filter_ctx(t, 0, false)
+	reg_filt_bits := h.interpolation_filter == av1.SWITCHABLE ? u64(av1.symbol_cost(t.cdfs.interp_filter_cdf[filt_ctx][:], av1.EIGHTTAP_REGULAR)) : u64(0)
+	global_filt_bits := min(w, bh) >= 8 ? u64(0) : reg_filt_bits
+
+	not_new_bits := u64(av1.symbol_cost(t.cdfs.new_mv_cdf[t.mv_stack.new_mv_context][:], 1))
+	global_bits := not_new_bits + u64(av1.symbol_cost(t.cdfs.zero_mv_cdf[t.mv_stack.zero_mv_context][:], 0))
+	not_zero_bits := not_new_bits + u64(av1.symbol_cost(t.cdfs.zero_mv_cdf[t.mv_stack.zero_mv_context][:], 1))
+	nearest_bits := not_zero_bits + u64(av1.symbol_cost(t.cdfs.ref_mv_cdf[t.mv_stack.ref_mv_context][:], 0))
+	near_bits := not_zero_bits + u64(av1.symbol_cost(t.cdfs.ref_mv_cdf[t.mv_stack.ref_mv_context][:], 1))
+	if t.mv_stack.num_mv_found > 2 {
+		near_bits += u64(av1.symbol_cost(t.cdfs.drl_mode_cdf[t.mv_stack.drl_ctx_stack[1]][:], 0))
+	}
+	new_base_bits := u64(av1.symbol_cost(t.cdfs.new_mv_cdf[t.mv_stack.new_mv_context][:], 0))
+	if t.mv_stack.num_mv_found > 1 {
+		new_base_bits += u64(av1.symbol_cost(t.cdfs.drl_mode_cdf[t.mv_stack.drl_ctx_stack[0]][:], 0))
+	}
 
 	nearest_mv := t.mv_stack.ref_stack_mv[0][0]
 	near_mv := t.mv_stack.ref_stack_mv[1][0]
@@ -964,36 +1453,42 @@ search_ref_motion :: proc(
 	best_pred_mv = global_mv
 	best_filter = av1.EIGHTTAP_REGULAR
 	zero_sad := eval_inter_mv(t, &rp, global_mv, av1.EIGHTTAP_REGULAR, pred_buf[:], src, s_stride, px, py, w, bh)
-	best_cost = zero_sad
+	best_mode_bits := global_bits
+	best_cost = zero_sad + ((rate_q * (global_bits + global_filt_bits)) >> 12)
 
 	// 2. Evaluate NEARESTMV.
 	nearest_sad := zero_sad
 	if nearest_mv != global_mv {
 		nearest_sad = eval_inter_mv(t, &rp, nearest_mv, av1.EIGHTTAP_REGULAR, pred_buf[:], src, s_stride, px, py, w, bh)
-		c := nearest_sad + mode_pen
-		if c < best_cost {
-			best_cost = c
-			best_mode = av1.NEARESTMV
-			best_mv = nearest_mv
-			best_pred_mv = nearest_mv
-		}
+	}
+	nearest_cost := nearest_sad + ((rate_q * (nearest_bits + reg_filt_bits)) >> 12)
+	if nearest_cost < best_cost {
+		best_cost = nearest_cost
+		best_mode = av1.NEARESTMV
+		best_mv = nearest_mv
+		best_pred_mv = nearest_mv
+		best_mode_bits = nearest_bits
 	}
 
 	// 3. Evaluate NEARMV (if found).
-	if t.mv_stack.num_mv_found > 1 && near_mv != nearest_mv && near_mv != global_mv {
-		near_sad := eval_inter_mv(t, &rp, near_mv, av1.EIGHTTAP_REGULAR, pred_buf[:], src, s_stride, px, py, w, bh)
-		c := near_sad + mode_pen * 2
+	near_sad := zero_sad
+	has_near := t.mv_stack.num_mv_found > 1 && near_mv != nearest_mv && near_mv != global_mv
+	if has_near {
+		near_sad = eval_inter_mv(t, &rp, near_mv, av1.EIGHTTAP_REGULAR, pred_buf[:], src, s_stride, px, py, w, bh)
+		c := near_sad + ((rate_q * (near_bits + reg_filt_bits)) >> 12)
 		if c < best_cost {
 			best_cost = c
 			best_mode = av1.NEARMV
 			best_mv = near_mv
 			best_pred_mv = near_mv
+			best_mode_bits = near_bits
 		}
 	}
 
 	// Early exit if residual SAD is already tiny or full search is not requested.
 	skip_sad := u64(w * bh) * u64(max(1 << bd_shift, ac_q >> 5))
-	if !do_full_search || best_cost <= skip_sad {
+	best_raw_sad := best_mode == av1.GLOBALMV ? zero_sad : (best_mode == av1.NEARESTMV ? nearest_sad : near_sad)
+	if !do_full_search || best_raw_sad <= skip_sad {
 		if ref_frame == av1.LAST_FRAME do t.last_mv = best_mv
 		return
 	}
@@ -1001,12 +1496,15 @@ search_ref_motion :: proc(
 	// 4. Multi-seed integer diamond search (for NEWMV with ref_mv_idx = 0).
 	search_mv := global_mv
 	search_sad := zero_sad
+	search_cost := search_sad + ((rate_q * mv_cost_256(t, search_mv, nearest_mv)) >> 12)
 	raw_seeds := [3]av1.Mv{nearest_mv, near_mv, t.last_mv}
 	for raw in raw_seeds {
 		cand := av1.Mv{i16(int(raw[0]) & ~int(7)), i16(int(raw[1]) & ~int(7))}
 		if cand == global_mv || cand == search_mv do continue
-		sad := cand == nearest_mv ? nearest_sad : eval_inter_mv(t, &rp, cand, av1.EIGHTTAP_REGULAR, pred_buf[:], src, s_stride, px, py, w, bh)
-		if sad < search_sad {
+		sad := cand == nearest_mv ? nearest_sad : (has_near && cand == near_mv ? near_sad : eval_inter_mv(t, &rp, cand, av1.EIGHTTAP_REGULAR, pred_buf[:], src, s_stride, px, py, w, bh))
+		cost := sad + ((rate_q * mv_cost_256(t, cand, nearest_mv)) >> 12)
+		if cost < search_cost {
+			search_cost = cost
 			search_sad = sad
 			search_mv = cand
 		}
@@ -1029,7 +1527,9 @@ search_ref_motion :: proc(
 				if abs(cand_r - base_r) > max_range || abs(cand_c - base_c) > max_range do continue
 				cand := av1.Mv{i16(cand_r), i16(cand_c)}
 				sad := eval_inter_mv(t, &rp, cand, av1.EIGHTTAP_REGULAR, pred_buf[:], src, s_stride, px, py, w, bh)
-				if sad < search_sad {
+				cost := sad + ((rate_q * mv_cost_256(t, cand, nearest_mv)) >> 12)
+				if cost < search_cost {
+					search_cost = cost
 					search_sad = sad
 					search_mv = cand
 					best_dir = dir
@@ -1040,40 +1540,82 @@ search_ref_motion :: proc(
 		}
 	}
 
-	// 5. Subpel refinement (half-pel = 4, quarter-pel = 2, eighth-pel = 1).
+	// Check if subpel predictors beat the integer search result before subpel refinement.
+	if nearest_mv != search_mv {
+		cost := nearest_sad + ((rate_q * mv_cost_256(t, nearest_mv, nearest_mv)) >> 12)
+		if cost < search_cost {
+			search_cost = cost
+			search_sad = nearest_sad
+			search_mv = nearest_mv
+		}
+	}
+	if has_near && near_mv != search_mv {
+		cost := near_sad + ((rate_q * mv_cost_256(t, near_mv, nearest_mv)) >> 12)
+		if cost < search_cost {
+			search_cost = cost
+			search_sad = near_sad
+			search_mv = near_mv
+		}
+	}
+
+	// 5. Subpel refinement (half-pel = 4, quarter-pel = 2, eighth-pel = 1) with diagonal check.
 	if !h.force_integer_mv && !e.config.ultrafast && search_sad > skip_sad && search_sad < best_cost + (best_cost >> 2) {
 		min_step := h.allow_high_precision_mv ? 1 : 2
 		for step := 4; step >= min_step; step >>= 1 {
 			cur_r := int(search_mv[0])
 			cur_c := int(search_mv[1])
-			for d in DIAMOND {
-				cand_r := cur_r + d[0] * step
-				cand_c := cur_c + d[1] * step
-				cand := av1.Mv{i16(cand_r), i16(cand_c)}
+			c_up := u64(max(u64))
+			c_dn := u64(max(u64))
+			c_lt := u64(max(u64))
+			c_rt := u64(max(u64))
+			for d, dir in DIAMOND {
+				cand := av1.Mv{i16(cur_r + d[0] * step), i16(cur_c + d[1] * step)}
 				sad := eval_inter_mv(t, &rp, cand, av1.EIGHTTAP_REGULAR, pred_buf[:], src, s_stride, px, py, w, bh)
-				if sad < search_sad {
+				cost := sad + ((rate_q * mv_cost_256(t, cand, nearest_mv)) >> 12)
+				if dir == 0 do c_up = cost
+				if dir == 1 do c_dn = cost
+				if dir == 2 do c_lt = cost
+				if dir == 3 do c_rt = cost
+				if cost < search_cost {
+					search_cost = cost
 					search_sad = sad
 					search_mv = cand
 				}
 			}
+			dr := c_up < c_dn ? -step : step
+			dc := c_lt < c_rt ? -step : step
+			diag := av1.Mv{i16(cur_r + dr), i16(cur_c + dc)}
+			diag_sad := eval_inter_mv(t, &rp, diag, av1.EIGHTTAP_REGULAR, pred_buf[:], src, s_stride, px, py, w, bh)
+			diag_cost := diag_sad + ((rate_q * mv_cost_256(t, diag, nearest_mv)) >> 12)
+			if diag_cost < search_cost {
+				search_cost = diag_cost
+				search_sad = diag_sad
+				search_mv = diag
+			}
 		}
 	}
 
-	// Check if NEWMV beats best_cost using logarithmic MV bit cost.
-	newmv_pen := (4 + mv_diff_bits(search_mv[0] - nearest_mv[0], search_mv[1] - nearest_mv[1])) * bit_pen
-	if search_sad + newmv_pen < best_cost {
-		best_cost = search_sad + newmv_pen
-		best_mode = av1.NEWMV
-		best_mv = search_mv
-		best_pred_mv = nearest_mv
+	// Check if NEWMV beats best_cost using exact CDF mode + MV bit cost.
+	if search_mv != nearest_mv && search_mv != global_mv {
+		new_mode_mv_bits := new_base_bits + mv_cost_256(t, search_mv, nearest_mv)
+		new_total := search_sad + ((rate_q * (new_mode_mv_bits + reg_filt_bits)) >> 12)
+		if new_total < best_cost {
+			best_cost = new_total
+			best_mode = av1.NEWMV
+			best_mv = search_mv
+			best_pred_mv = nearest_mv
+			best_mode_bits = new_mode_mv_bits
+		}
 	}
 
 	// 6. Switchable interpolation filter check on subpel MVs.
 	if !e.config.ultrafast && h.interpolation_filter == av1.SWITCHABLE && ((best_mv[0] & 7) != 0 || (best_mv[1] & 7) != 0) {
 		for f in u8(av1.EIGHTTAP_SMOOTH) ..= u8(av1.EIGHTTAP_SHARP) {
+			f_bits := (best_mode == av1.GLOBALMV && min(w, bh) >= 8) ? u64(0) : u64(av1.symbol_cost(t.cdfs.interp_filter_cdf[filt_ctx][:], int(f)))
 			sad := eval_inter_mv(t, &rp, best_mv, int(f), pred_buf[:], src, s_stride, px, py, w, bh)
-			if sad + mode_pen < best_cost {
-				best_cost = sad + mode_pen
+			c := sad + ((rate_q * (best_mode_bits + f_bits)) >> 12)
+			if c < best_cost {
+				best_cost = c
 				best_filter = f
 			}
 		}
@@ -1096,12 +1638,8 @@ select_prediction_mode :: proc(
 	if h.frame_is_intra || (seg_has_ref && seg_ref == av1.INTRA_FRAME) {
 		t.is_inter = false
 		t.ref_frame = {av1.INTRA_FRAME, av1.NONE}
-		t.y_mode, _ = choose_intra_y(t, T)
-		if t.has_chroma {
-			t.uv_mode = choose_intra_uv(t, T)
-		} else {
-			t.uv_mode = av1.DC_PRED
-		}
+		t.y_mode, t.angle_delta_y, _ = choose_intra_y(t, T)
+		t.uv_mode = av1.DC_PRED
 		return
 	}
 
@@ -1116,12 +1654,13 @@ select_prediction_mode :: proc(
 		for i in 0 ..< av1.TOTAL_REFS_PER_FRAME {
 			sign_bias_u8[i] = u8(h.ref_frame_sign_bias[i])
 		}
+		mf_ptr: ^[av1.TOTAL_REFS_PER_FRAME][]av1.Mv = h.use_ref_frame_mvs ? &e.motion_field_mvs : nil
 		av1.find_mv_stack(
 			&t.mv_stack, &t.grid,
 			t.mi_row, t.mi_col, t.mi_size,
 			t.ref_frame, false,
 			h.allow_high_precision_mv, h.force_integer_mv,
-			false, nil,
+			h.use_ref_frame_mvs, mf_ptr,
 			h.gm_type, h.gm_params, sign_bias_u8,
 		)
 		t.pred_mv[0] = t.mv_stack.global_mvs[0]
@@ -1142,65 +1681,144 @@ select_prediction_mode :: proc(
 		return
 	}
 
-	// General inter frame: evaluate LAST_FRAME, GOLDEN_FRAME / ALTREF_FRAME, and Intra.
+	// General inter frame: evaluate LAST_FRAME, GOLDEN_FRAME / ALTREF_FRAME, Compound, and Intra.
 	bd_shift := uint(e.bit_depth - 8)
 	ac_q := int(av1.ac_quant(e.q_idx, 0, e.bit_depth))
-	best_rf := i8(av1.LAST_FRAME)
-	best_mode, best_mv, best_pred_mv, best_filt, best_cost := search_ref_motion(t, av1.LAST_FRAME, true, T)
+	rate_q := u64(max(16 << bd_shift, ac_q))
+	best_rf := [2]i8{av1.LAST_FRAME, av1.NONE}
+	last_mode, last_mv, last_pred_mv, last_filt, last_cost := search_ref_motion(t, av1.LAST_FRAME, true, T)
+	last_ref_cost := (rate_q * ref_frame_cost_256(t, av1.LAST_FRAME, av1.NONE)) >> 12
+	best_mode := last_mode
+	best_mv := [2]av1.Mv{last_mv, {}}
+	best_pred_mv := [2]av1.Mv{last_pred_mv, {}}
+	best_filt := last_filt
+	best_cost := last_cost + last_ref_cost
 	best_stack := t.mv_stack
 
-	alt_thresh := u64(t.bw4 * t.bh4 * 24) << bd_shift
-	full_alt_thresh := u64(t.bw4 * t.bh4 * 48) << bd_shift
-	ref_pen := u64(max(2 << bd_shift, ac_q >> 3))
-	if !e.config.ultrafast && !e.last_keyframe && (t.lossless || best_cost > alt_thresh) {
-		if ((e.frames % u64(e.config.keyframe_interval)) & 7) != 1 || e.has_altref {
-			gold_mode, gold_mv, gold_pred_mv, gold_filt, gold_cost := search_ref_motion(t, av1.GOLDEN_FRAME, t.lossless || best_cost > full_alt_thresh, T)
-			if gold_cost + ref_pen < best_cost {
-				best_rf = av1.GOLDEN_FRAME
-				best_mode = gold_mode
-				best_mv = gold_mv
-				best_pred_mv = gold_pred_mv
-				best_filt = gold_filt
-				best_cost = gold_cost + ref_pen
+	full_alt_thresh := u64(t.bw4 * t.bh4 * 8) << bd_shift
+	if !e.config.ultrafast && (!e.last_keyframe || e.has_altref) && (t.lossless || last_cost > last_ref_cost) {
+		alt_refs := [2]i8{av1.GOLDEN_FRAME, av1.ALTREF_FRAME}
+		num_alt := 1 + int(e.has_altref)
+		px := t.mi_col * av1.MI_SIZE
+		py := t.mi_row * av1.MI_SIZE
+		w := t.bw4 * av1.MI_SIZE
+		bh := t.bh4 * av1.MI_SIZE
+		s_stride := e.source_strides[0]
+		src := plane_t(e.source[0], T)[py * s_stride + px:]
+		rp_last := ref_plane_for_slot(e, av1.LAST_FRAME, 0, T)
+		pred_buf: [64 * 64]T = ---
+		comp_preds: [2][64 * 64]i32 = ---
+		sign_bias_u8: [av1.TOTAL_REFS_PER_FRAME]u8
+		for i in 0 ..< av1.TOTAL_REFS_PER_FRAME {
+			sign_bias_u8[i] = u8(h.ref_frame_sign_bias[i])
+		}
+
+		for alt_rf, ri in alt_refs[:num_alt] {
+			if ri == 0 && (e.last_keyframe || ((e.frames % u64(e.config.keyframe_interval)) & 7) == 1) && e.has_altref {
+				continue
+			}
+			alt_ref_cost := (rate_q * ref_frame_cost_256(t, alt_rf, av1.NONE)) >> 12
+			if best_cost <= alt_ref_cost do continue
+			alt_mode, alt_mv, alt_pred_mv, alt_filt, alt_cost := search_ref_motion(t, alt_rf, t.lossless || last_cost > full_alt_thresh, T)
+			if alt_cost + alt_ref_cost < best_cost {
+				best_rf = {alt_rf, av1.NONE}
+				best_mode = alt_mode
+				best_mv = {alt_mv, {}}
+				best_pred_mv = {alt_pred_mv, {}}
+				best_filt = alt_filt
+				best_cost = alt_cost + alt_ref_cost
 				best_stack = t.mv_stack
 			}
-		}
-		if e.has_altref && (t.lossless || best_cost > alt_thresh) {
-			arf_mode, arf_mv, arf_pred_mv, arf_filt, arf_cost := search_ref_motion(t, av1.ALTREF_FRAME, t.lossless || best_cost > full_alt_thresh, T)
-			if arf_cost + ref_pen < best_cost {
-				best_rf = av1.ALTREF_FRAME
-				best_mode = arf_mode
-				best_mv = arf_mv
-				best_pred_mv = arf_pred_mv
-				best_filt = arf_filt
-				best_cost = arf_cost + ref_pen
-				best_stack = t.mv_stack
+
+			// Evaluate Compound Reference (LAST_FRAME + alt_rf) when reference_select is enabled.
+			if h.reference_select && min(w, bh) >= 8 {
+				comp_rf := [2]i8{av1.LAST_FRAME, alt_rf}
+				t.ref_frame = comp_rf
+				mf_ptr: ^[av1.TOTAL_REFS_PER_FRAME][]av1.Mv = h.use_ref_frame_mvs ? &e.motion_field_mvs : nil
+				av1.find_mv_stack(
+					&t.mv_stack, &t.grid,
+					t.mi_row, t.mi_col, t.mi_size,
+					comp_rf, true,
+					h.allow_high_precision_mv, h.force_integer_mv,
+					h.use_ref_frame_mvs, mf_ptr,
+					h.gm_type, h.gm_params, sign_bias_u8,
+				)
+				comp_ref_bits := ref_frame_cost_256(t, av1.LAST_FRAME, alt_rf)
+				comp_ctx := int(av1.COMPOUND_MODE_CTX_MAP[t.mv_stack.ref_mv_context >> 1][min(t.mv_stack.new_mv_context, av1.COMP_NEWMV_CTXS - 1)])
+				filt_ctx := get_interp_filter_ctx(t, 0, true)
+				reg_filt_bits := h.interpolation_filter == av1.SWITCHABLE ? u64(av1.symbol_cost(t.cdfs.interp_filter_cdf[filt_ctx][:], av1.EIGHTTAP_REGULAR)) : u64(0)
+				rp_alt := ref_plane_for_slot(e, alt_rf, 0, T)
+
+				c_nearest := t.mv_stack.ref_stack_mv[0]
+				c_near := t.mv_stack.ref_stack_mv[1]
+				c_global := t.mv_stack.global_mvs
+
+				Comp_Cand :: struct {
+					mode: u8,
+					mv0, mv1: av1.Mv,
+					pred0, pred1: av1.Mv,
+				}
+				cands := [4]Comp_Cand{
+					{av1.NEAREST_NEARESTMV, c_nearest[0], c_nearest[1], c_nearest[0], c_nearest[1]},
+					{av1.NEAR_NEARMV, c_near[0], c_near[1], c_near[0], c_near[1]},
+					{av1.GLOBAL_GLOBALMV, c_global[0], c_global[1], c_global[0], c_global[1]},
+					{av1.NEW_NEWMV, last_mv, alt_mv, c_nearest[0], c_nearest[1]},
+				}
+				for cand, ci in cands {
+					if ci == 1 && (t.mv_stack.num_mv_found <= 1 || (cand.mv0 == c_nearest[0] && cand.mv1 == c_nearest[1])) do continue
+					if ci == 2 && cand.mv0 == c_nearest[0] && cand.mv1 == c_nearest[1] do continue
+					if ci == 3 && cand.mv0 == c_nearest[0] && cand.mv1 == c_nearest[1] do continue
+
+					mode_bits := comp_ref_bits + u64(av1.symbol_cost(t.cdfs.compound_mode_cdf[comp_ctx][:], int(cand.mode) - av1.NEAREST_NEARESTMV))
+					if cand.mode == av1.NEW_NEWMV {
+						if t.mv_stack.num_mv_found > 1 {
+							mode_bits += u64(av1.symbol_cost(t.cdfs.drl_mode_cdf[t.mv_stack.drl_ctx_stack[0]][:], 0))
+						}
+						mode_bits += mv_cost_256(t, cand.mv0, cand.pred0) + mv_cost_256(t, cand.mv1, cand.pred1)
+					} else if cand.mode == av1.NEAR_NEARMV {
+						if t.mv_stack.num_mv_found > 2 {
+							mode_bits += u64(av1.symbol_cost(t.cdfs.drl_mode_cdf[t.mv_stack.drl_ctx_stack[1]][:], 0))
+						}
+					}
+					if cand.mode != av1.GLOBAL_GLOBALMV {
+						mode_bits += reg_filt_bits
+					}
+					rate_cost := (rate_q * mode_bits) >> 12
+					if best_cost <= rate_cost do continue
+					c_sad := eval_compound_mv(t, &rp_last, &rp_alt, cand.mv0, cand.mv1, av1.EIGHTTAP_REGULAR, pred_buf[:], &comp_preds, src, s_stride, px, py, w, bh)
+					if c_sad + rate_cost < best_cost {
+						best_cost = c_sad + rate_cost
+						best_rf = comp_rf
+						best_mode = cand.mode
+						best_mv = {cand.mv0, cand.mv1}
+						best_pred_mv = {cand.pred0, cand.pred1}
+						best_filt = av1.EIGHTTAP_REGULAR
+						best_stack = t.mv_stack
+					}
+				}
 			}
 		}
 	}
 
 	intra_thresh := u64(t.bw4 * t.bh4 * 16) * u64(max(8 << bd_shift, ac_q >> 2))
 	if !t.lossless && t.mi_size <= av1.BLOCK_32X32 && best_cost > intra_thresh {
-		intra_mode, intra_sad := choose_intra_y(t, T)
+		intra_mode, intra_angle, intra_sad := choose_intra_y(t, T)
 		intra_pen := u64(max(8 << bd_shift, ac_q >> 1)) * 6
 		if intra_sad + intra_pen < best_cost {
 			t.is_inter = false
 			t.ref_frame = {av1.INTRA_FRAME, av1.NONE}
 			t.y_mode = intra_mode
-			if t.has_chroma {
-				t.uv_mode = choose_intra_uv(t, T)
-			} else {
-				t.uv_mode = av1.DC_PRED
-			}
+			t.angle_delta_y = intra_angle
+			t.uv_mode = av1.DC_PRED
 			return
 		}
 	}
 
 	t.is_inter = true
-	t.ref_frame = {best_rf, av1.NONE}
+	t.ref_frame = best_rf
 	t.y_mode = best_mode
-	t.mv[0] = best_mv
-	t.pred_mv[0] = best_pred_mv
+	t.mv = best_mv
+	t.pred_mv = best_pred_mv
 	t.interp_filter = {best_filt, best_filt}
 	t.uv_mode = av1.DC_PRED
 	t.mv_stack = best_stack
@@ -1345,6 +1963,9 @@ transform_and_reconstruct_block :: proc(t: ^Tile, seg_skip: bool, $T: typeid) ->
 	qindex := get_qindex(h, int(t.segment_id))
 
 	for plane in 0 ..< num_planes {
+		if plane == 1 && !t.is_inter && t.has_chroma {
+			choose_intra_uv(t, T)
+		}
 		sub_x := plane > 0 ? uint(e.ss_x) : 0
 		sub_y := plane > 0 ? uint(e.ss_y) : 0
 		tx_sz := av1.get_uv_tx_size(t.mi_size, plane, int(t.tx_size), t.lossless, u8(e.ss_x), u8(e.ss_y))
@@ -1435,10 +2056,18 @@ transform_and_reconstruct_block :: proc(t: ^Tile, seg_skip: bool, $T: typeid) ->
 				}
 
 				if plane == 0 {
+					luma_tx_type := u8(av1.DCT_DCT)
+					if !t.is_inter && !t.lossless && qindex > 0 {
+						tx_set := av1.get_tx_set(tx_sz, false, h.reduced_tx_set)
+						cand_tx := av1.MODE_TO_TXFM[t.y_mode]
+						if av1.TX_TYPE_IN_SET_INTRA[tx_set][cand_tx] != 0 {
+							luma_tx_type = cand_tx
+						}
+					}
 					for j in 0 ..< step_y {
 						for i in 0 ..< step_x {
 							if y4 + j < h.mi_rows && x4 + i < h.mi_cols {
-								e.tile_cells[(y4 + j) * h.mi_cols + (x4 + i)].tx_type = av1.DCT_DCT
+								e.tile_cells[(y4 + j) * h.mi_cols + (x4 + i)].tx_type = luma_tx_type
 							}
 						}
 					}
@@ -1525,79 +2154,60 @@ transform_and_reconstruct_block :: proc(t: ^Tile, seg_skip: bool, $T: typeid) ->
 
 						if nz_count > 0 {
 							rem := nz_count
-							nz_scan: [8]u16 = ---
+							nz_scan: [64]u16 = ---
 							found := 0
 							for c in 0 ..< seg_eob {
 								if q_slice[scan[c]] != 0 {
-									nz_scan[found & 7] = u16(c)
+									if found < 64 {
+										nz_scan[found] = u16(c)
+									}
 									found += 1
 									eob = c + 1
 									rem -= 1
 									if rem == 0 do break
 								}
 							}
-							if !t.lossless {
-								limit := min(found, 8)
-								for _ in 0 ..< limit {
-									curr_c := int(nz_scan[(found - 1) & 7])
-									last_pos := int(scan[curr_c])
-									if abs(q_slice[last_pos]) != 1 do break
-									if last_pos == 0 && (!t.is_inter || found > 1) do break
-									prev_eob := found > 1 ? int(nz_scan[(found - 2) & 7]) + 1 : 0
+							if !t.lossless && found <= 64 && abs(q_slice[scan[eob - 1]]) == 1 {
+								best_score := i64(0)
+								best_found := 0
+								best_eob := 0
+								accu_score := i64(0)
+								base_bits := i64(t.is_inter ? (plane == 0 ? 7 : 6) : 5)
+								for i in 0 ..< found {
+									curr_c := int(nz_scan[i])
+									pos := int(scan[curr_c])
+									prev_eob := i > 0 ? int(nz_scan[i - 1]) + 1 : 0
 									zero_run := curr_c - prev_eob
-									dq_idx := (last_pos >> bwl) * w + (last_pos & ((1 << bwl) - 1))
+									dq_idx := (pos >> bwl) * w + (pos & ((1 << bwl) - 1))
 									av := i64(abs(t.fcoeffs_buf[dq_idx])) << dq_shift
-									step := i64(last_pos == 0 ? dc_q : ac_q)
-									dist_gain := 2 * av - step
-									rate_cost: i64
-									if last_pos == 0 {
-										rate_cost = (step * 6) >> 3
-									} else if prev_eob == 0 {
-										rate_cost = (step * i64(8 + (min(curr_c, 24) >> 1))) >> 3
-									} else {
-										rate_cost = (step * i64(4 + ((min(zero_run, 24) + 1) >> 1))) >> 3
+									step := i64(pos == 0 ? dc_q : ac_q)
+									aq := i64(abs(q_slice[pos]))
+									dist_gain := aq * (2 * av - aq * step)
+									eob_bits := i == 0 && curr_c > 0 ? i64(32 - intrinsics.count_leading_zeros(u32(curr_c))) : 0
+									bits := (i == 0 ? base_bits : i64(4)) + eob_bits + i64((min(zero_run, 32) * 3) >> 2)
+									if !t.is_inter && pos == 0 {
+										bits = 2
 									}
-									if dist_gain >= rate_cost do break
-									q_slice[last_pos] = 0
-									t.dequant_buf[dq_idx] = 0
-									eob = prev_eob
-									found -= 1
-									if found == 0 do break
+									rate_cost := (step * bits) >> 3
+									accu_score += dist_gain - rate_cost
+									if accu_score >= best_score {
+										best_score = accu_score
+										best_found = i + 1
+										best_eob = curr_c + 1
+									}
 								}
-								if t.is_inter && found > 0 && found <= 3 {
-									all_ones := true
-									total_dist_gain := i64(0)
-									has_dc := false
-									for k in 0 ..< found {
-										pos := int(scan[nz_scan[k]])
-										if abs(q_slice[pos]) != 1 {
-											all_ones = false
-											break
-										}
-										if pos == 0 do has_dc = true
+								if best_found < found {
+									for i in best_found ..< found {
+										pos := int(scan[nz_scan[i]])
 										dq_idx := (pos >> bwl) * w + (pos & ((1 << bwl) - 1))
-										av := i64(abs(t.fcoeffs_buf[dq_idx])) << dq_shift
-										step := i64(pos == 0 ? dc_q : ac_q)
-										total_dist_gain += 2 * av - step
+										q_slice[pos] = 0
+										t.dequant_buf[dq_idx] = 0
 									}
-									if all_ones {
-										base_bits := (has_dc ? 2 : 5) + 3 * found + (min(eob - found, 24) >> 1)
-										total_rate_cost := (i64(ac_q) * i64(base_bits)) >> 3
-										if total_dist_gain < total_rate_cost {
-											for k in 0 ..< found {
-												pos := int(scan[nz_scan[k]])
-												q_slice[pos] = 0
-												dq_idx := (pos >> bwl) * w + (pos & ((1 << bwl) - 1))
-												t.dequant_buf[dq_idx] = 0
-											}
-											eob = 0
-											found = 0
-										}
+									eob = best_eob
+									if eob == 1 && scan[0] == 0 {
+										max_r = 0
+										max_c = 0
 									}
-								}
-								if eob == 1 && scan[0] == 0 {
-									max_r = 0
-									max_c = 0
 								}
 							}
 							if eob > 0 {
@@ -1632,6 +2242,15 @@ transform_and_reconstruct_block :: proc(t: ^Tile, seg_skip: bool, $T: typeid) ->
 					}
 				}
 
+				if eob == 0 && plane == 0 {
+					for j in 0 ..< step_y {
+						for i in 0 ..< step_x {
+							if y4 + j < h.mi_rows && x4 + i < h.mi_cols {
+								e.tile_cells[(y4 + j) * h.mi_cols + (x4 + i)].tx_type = av1.DCT_DCT
+							}
+						}
+					}
+				}
 				t.blk_eobs[plane][tb_idx] = u16(eob)
 				tb_idx += 1
 				coeff_off += seg_eob
@@ -2292,11 +2911,12 @@ write_tx_size :: proc(t: ^Tile, allow_select: bool) {
 			}
 		}
 		ctx := int(above_w >= max_tx_w) + int(left_h >= max_tx_h)
+		tx_depth := int(t.tx_size) == max_rect_tx_size ? 0 : 1
 		switch max_tx_depth {
-		case 4: put_symbol(&t.sym, 0, t.cdfs.tx_64x64_cdf[ctx][:])
-		case 3: put_symbol(&t.sym, 0, t.cdfs.tx_32x32_cdf[ctx][:])
-		case 2: put_symbol(&t.sym, 0, t.cdfs.tx_16x16_cdf[ctx][:])
-		case:   put_symbol(&t.sym, 0, t.cdfs.tx_8x8_cdf[ctx][:])
+		case 4: put_symbol(&t.sym, tx_depth, t.cdfs.tx_64x64_cdf[ctx][:])
+		case 3: put_symbol(&t.sym, tx_depth, t.cdfs.tx_32x32_cdf[ctx][:])
+		case 2: put_symbol(&t.sym, tx_depth, t.cdfs.tx_16x16_cdf[ctx][:])
+		case:   put_symbol(&t.sym, tx_depth, t.cdfs.tx_8x8_cdf[ctx][:])
 		}
 	}
 }
@@ -2306,6 +2926,7 @@ write_var_tx_size :: proc(t: ^Tile, row, col, tx_sz, depth: int) {
 	e := t.e
 	h := &e.header
 	if row >= h.mi_rows || col >= h.mi_cols do return
+	txfm_split := int(t.tx_size) != tx_sz ? 1 : 0
 	if tx_sz != av1.TX_4X4 && depth < av1.MAX_VARTX_DEPTH {
 		above := int(get_above_tx_width(t, row, col) < int(av1.TX_WIDTH[tx_sz]))
 		left := int(get_left_tx_height(t, row, col) < int(av1.TX_HEIGHT[tx_sz]))
@@ -2313,15 +2934,26 @@ write_var_tx_size :: proc(t: ^Tile, row, col, tx_sz, depth: int) {
 		max_tx_sz := av1.find_tx_size(sz, sz)
 		tx_sz_sqr_up := int(av1.TX_SIZE_SQR_UP[tx_sz])
 		ctx := int(tx_sz_sqr_up != max_tx_sz) * 3 + (av1.TX_SIZES - 1 - max_tx_sz) * 6 + above + left
-		put_symbol(&t.sym, 0, t.cdfs.txfm_split_cdf[ctx][:])
+		put_symbol(&t.sym, txfm_split, t.cdfs.txfm_split_cdf[ctx][:])
 	}
 	w4 := int(av1.TX_WIDTH[tx_sz]) / av1.MI_SIZE
 	h4 := int(av1.TX_HEIGHT[tx_sz]) / av1.MI_SIZE
-	for i in 0 ..< h4 {
-		if row + i >= h.mi_rows do break
-		for j in 0 ..< w4 {
-			if col + j >= h.mi_cols do break
-			e.tile_cells[(row + i) * h.mi_cols + (col + j)].inter_tx_size = u8(tx_sz)
+	if txfm_split != 0 {
+		sub_tx_sz := int(av1.SPLIT_TX_SIZE[tx_sz])
+		step_w := int(av1.TX_WIDTH[sub_tx_sz]) / av1.MI_SIZE
+		step_h := int(av1.TX_HEIGHT[sub_tx_sz]) / av1.MI_SIZE
+		for i := 0; i < h4; i += step_h {
+			for j := 0; j < w4; j += step_w {
+				write_var_tx_size(t, row + i, col + j, sub_tx_sz, depth + 1)
+			}
+		}
+	} else {
+		for i in 0 ..< h4 {
+			if row + i >= h.mi_rows do break
+			for j in 0 ..< w4 {
+				if col + j >= h.mi_cols do break
+				e.tile_cells[(row + i) * h.mi_cols + (col + j)].inter_tx_size = u8(tx_sz)
+			}
 		}
 	}
 }
@@ -2597,7 +3229,7 @@ write_coeffs :: proc(t: ^Tile, plane, start_x, start_y, tx_sz: int, q_in: []i32,
 		}
 	} else {
 		if plane == 0 {
-			write_transform_type(t, x4, y4, tx_sz, av1.DCT_DCT)
+			write_transform_type(t, x4, y4, tx_sz, e.tile_cells[y4 * h.mi_cols + x4].tx_type)
 		}
 		t.plane_tx_type = compute_tx_type(t, plane, tx_sz, x4, y4)
 		scan := av1.get_scan(tx_sz, int(t.plane_tx_type))

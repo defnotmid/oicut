@@ -85,9 +85,11 @@ video.destroy(&w)
   BlockAdditional 1, which Chrome, Firefox and Edge composite. Files are
   within a few percent of libvpx's at equal quality ([BENCHMARKS](../BENCHMARKS.md)).
 - **AV1:** `codec = .AV1` writes MP4 with the native AV1 encoder, audio
-  included, and no transparency. It shares VP9's `base_q_idx = 5 * qp`, so
-  the same `qp` gives about 3 dB lower PSNR than H.264 or H.265; lower `qp`
-  by about five for similar quality.
+  included, and no transparency. `qp` (`0..51`, `0` lossless) maps to
+  `base_q_idx` through `av1_q_index(qp)` (`qp` 18, 23, 28, 33, 38 →
+  `base_q_idx` 28, 60, 100, 140, 180), so the same `qp` gives about
+  H.264's PSNR: within 0.1 dB on 1080p camera footage and 0.6 dB on a
+  motion-graphics clip at `qp` 23 and 33.
 - **Transparency:** `transparency = .Premultiplied` or `.Straight` keeps alpha
   as an H.265 auxiliary alpha layer (native encoder, `OICUT_PATENTED` builds; Annex F, laid out as
   Apple's VideoToolbox encoder writes it), which Safari, QuickTime and

@@ -111,9 +111,14 @@ Encoder :: struct {
 	mi_cols, mi_rows: int,
 	sb_cols, sb_rows: int,
 
-	cdfs:             av1.CDF_Context,
-	slot_cdfs:        [3]av1.CDF_Context,
-	slot_order_hints: [3]u8,
+	cdfs:                   av1.CDF_Context,
+	slot_cdfs:              [3]av1.CDF_Context,
+	slot_order_hints:       [3]u8,
+	slot_saved_order_hints: [3][av1.TOTAL_REFS_PER_FRAME]u8,
+	slot_frame_type:        [3]av1.Frame_Type,
+	cur_saved_mvs:          #soa[]av1.Saved_MV_Cell,
+	slot_saved_mvs:         [3]#soa[]av1.Saved_MV_Cell,
+	motion_field_mvs:       [av1.TOTAL_REFS_PER_FRAME][]av1.Mv,
 
 	tiles:           []Tile,
 	packet:          [dynamic]u8,
@@ -138,6 +143,7 @@ Encoder :: struct {
 	allow_comp:      bool,
 	allow_hp:        bool,
 	lossless:        bool,
+	last_non_skip_cells: int,
 	initialized:     bool,
 }
 
@@ -214,6 +220,17 @@ init_encoder :: proc(e: ^Encoder, config: Encoder_Config) -> Error {
 	if err != nil do return .Out_Of_Memory
 	e.cdef_idx, err = make([]i8, e.sb_cols * e.sb_rows)
 	if err != nil do return .Out_Of_Memory
+	n8 := (e.mi_rows >> 1) * (e.mi_cols >> 1)
+	e.cur_saved_mvs, err = make_soa(#soa[]av1.Saved_MV_Cell, n8)
+	if err != nil do return .Out_Of_Memory
+	for slot in 0 ..< 3 {
+		e.slot_saved_mvs[slot], err = make_soa(#soa[]av1.Saved_MV_Cell, n8)
+		if err != nil do return .Out_Of_Memory
+	}
+	for ref in av1.LAST_FRAME ..= av1.ALTREF_FRAME {
+		e.motion_field_mvs[ref], err = make([]av1.Mv, n8)
+		if err != nil do return .Out_Of_Memory
+	}
 
 	sample_bytes := e.bit_depth > 8 ? 2 : 1
 	num_planes := e.mono_chrome ? 1 : 3
@@ -289,6 +306,13 @@ destroy_encoder :: proc(e: ^Encoder) {
 	delete(e.segment_ids)
 	delete(e.prev_segment_ids)
 	delete(e.cdef_idx)
+	delete_soa(e.cur_saved_mvs)
+	for slot in 0 ..< 3 {
+		delete_soa(e.slot_saved_mvs[slot])
+	}
+	for ref in av1.LAST_FRAME ..= av1.ALTREF_FRAME {
+		delete(e.motion_field_mvs[ref])
+	}
 	delete(e.packet)
 	delete(e.seq_obu)
 	delete(e.header_buf)
@@ -381,14 +405,14 @@ encode_frame_internal :: proc(e: ^Encoder, planes: [3][]u8, strides: [3]int, is_
 		e.show_frame = false
 		e.refresh_golden = false
 		e.refresh_frame_flags = 1 << 2
-		e.allow_comp = false
+		e.allow_comp = !e.config.ultrafast && !e.last_keyframe && e.config.base_q_idx > 0
 		e.order_hint = u8((e.frames + 2) & 0xFF)
 	} else {
 		e.keyframe = gop_frame == 0
 		e.show_frame = true
 		e.refresh_golden = !e.keyframe && (gop_frame & 7) == 0 && e.config.keyframe_interval >= 8
 		e.refresh_frame_flags = e.keyframe ? 0xFF : (e.refresh_golden ? 3 : 1)
-		e.allow_comp = false
+		e.allow_comp = !e.config.ultrafast && !e.keyframe && ((!e.last_keyframe && (gop_frame & 7) != 1 && e.config.keyframe_interval >= 8) || e.has_altref) && e.config.base_q_idx > 0
 		e.order_hint = u8((e.frames + 1) & 0xFF)
 	}
 
@@ -416,13 +440,44 @@ encode_frame_internal :: proc(e: ^Encoder, planes: [3][]u8, strides: [3]int, is_
 					}
 				}
 			}
-			e.q_idx = flat * 3 > total * 2 ? scale_q_idx(e.bit_depth, e.config.base_q_idx, 45, 100) : max(1, (e.config.base_q_idx * 3) >> 2)
+			e.q_idx = flat * 3 > total * 2 ? scale_q_idx(e.bit_depth, e.config.base_q_idx, 45, 100) : scale_q_idx(e.bit_depth, e.config.base_q_idx, 75, 100)
 		} else if is_altref {
 			e.q_idx = scale_q_idx(e.bit_depth, e.config.base_q_idx, 65, 100)
+		} else if (e.last_keyframe ? e.last_non_skip_cells * 5 : e.last_non_skip_cells * 16) < e.mi_cols * e.mi_rows && e.config.keyframe_interval >= 8 {
+			gf_rates := [8]i32{65, 110, 95, 110, 80, 110, 95, 110}
+			e.q_idx = scale_q_idx(e.bit_depth, e.config.base_q_idx, gf_rates[gop_frame & 7], 100)
 		}
 	}
 
 	prepare_frame_header(e, is_altref)
+
+	// Motion field estimation (Section 7.9).
+	if !e.header.frame_is_intra && e.header.use_ref_frame_mvs {
+		saved_refs: [av1.NUM_REF_FRAMES]av1.Saved_Ref_MVs
+		for i in 0 ..< 3 {
+			saved_refs[i] = {
+				cells       = e.slot_saved_mvs[i],
+				mi_rows     = e.mi_rows,
+				mi_cols     = e.mi_cols,
+				frame_type  = u8(e.slot_frame_type[i]),
+				order_hint  = e.slot_order_hints[i],
+				order_hints = e.slot_saved_order_hints[i],
+			}
+		}
+		ref_idx_i8: [av1.REFS_PER_FRAME]i8
+		for i in 0 ..< av1.REFS_PER_FRAME do ref_idx_i8[i] = i8(e.header.ref_frame_idx[i])
+		av1.motion_field_estimation(
+			&e.motion_field_mvs,
+			&saved_refs,
+			ref_idx_i8,
+			e.header.order_hints,
+			e.header.order_hint,
+			e.seq.enable_order_hint,
+			u8(e.seq.order_hint_bits),
+			e.mi_rows,
+			e.mi_cols,
+		)
+	}
 
 	// Reset frame-wide SOA grids.
 	cells := e.mi_rows * e.mi_cols
@@ -472,17 +527,51 @@ encode_frame_internal :: proc(e: ^Encoder, planes: [3][]u8, strides: [3]int, is_
 	// Post-processing wrapup (deblocking loop filter + CDEF).
 	filter_frame(e)
 
+	non_skip := 0
+	for s in e.tile_cells.skip[:cells] {
+		if !s do non_skip += 1
+	}
+	e.last_non_skip_cells = non_skip
+
+	// Motion field motion vector storage (Section 7.19).
+	if !e.header.frame_is_intra && e.refresh_frame_flags != 0 && e.seq.enable_ref_frame_mvs {
+		grid := av1.MI_Grid{
+			cells   = e.mi_cells[:cells],
+			mi_rows = e.mi_rows,
+			mi_cols = e.mi_cols,
+		}
+		saved_dst := av1.Saved_Ref_MVs{
+			cells   = e.cur_saved_mvs,
+			mi_rows = e.mi_rows,
+			mi_cols = e.mi_cols,
+		}
+		ref_idx_i8: [av1.REFS_PER_FRAME]i8
+		for i in 0 ..< av1.REFS_PER_FRAME do ref_idx_i8[i] = i8(e.header.ref_frame_idx[i])
+		ref_order_hint: [av1.NUM_REF_FRAMES]u8
+		for i in 0 ..< 3 do ref_order_hint[i] = e.slot_order_hints[i]
+		av1.store_motion_field_mvs(
+			&saved_dst,
+			&grid,
+			ref_idx_i8,
+			ref_order_hint,
+			e.header.order_hint,
+			e.seq.enable_order_hint,
+			u8(e.seq.order_hint_bits),
+		)
+	}
+
 	// Update reference slots and CDFs.
+	n8 := (e.mi_rows >> 1) * (e.mi_cols >> 1)
 	for slot in 0 ..< 3 {
 		if (e.refresh_frame_flags & (1 << uint(slot))) != 0 {
 			e.slot_cdfs[slot] = e.cdfs
 			e.slot_order_hints[slot] = e.header.order_hint
-		}
-	}
-	if e.keyframe {
-		for slot in 0 ..< 3 {
-			e.slot_cdfs[slot] = e.cdfs
-			e.slot_order_hints[slot] = e.header.order_hint
+			e.slot_saved_order_hints[slot] = e.header.order_hints
+			e.slot_frame_type[slot] = e.header.frame_type
+			if !e.header.frame_is_intra && e.seq.enable_ref_frame_mvs {
+				copy(e.slot_saved_mvs[slot].mv[:n8], e.cur_saved_mvs.mv[:n8])
+				copy(e.slot_saved_mvs[slot].ref_frame[:n8], e.cur_saved_mvs.ref_frame[:n8])
+			}
 		}
 	}
 

@@ -102,7 +102,7 @@ init_sequence_header :: proc(e: ^Encoder) {
 		enable_dual_filter             = false,
 		enable_order_hint              = true,
 		enable_jnt_comp                = false,
-		enable_ref_frame_mvs           = false,
+		enable_ref_frame_mvs           = true,
 		seq_force_screen_content_tools = 0,
 		seq_force_integer_mv           = av1.SELECT_INTEGER_MV,
 		order_hint_bits_minus_1        = 7,
@@ -376,7 +376,7 @@ prepare_frame_header :: proc(e: ^Encoder, is_altref: bool) {
 		h.is_filter_switchable = false
 		h.interpolation_filter = av1.EIGHTTAP_REGULAR
 		h.is_motion_mode_switchable = false
-		h.use_ref_frame_mvs = false
+		h.use_ref_frame_mvs = !e.config.ultrafast && !e.last_keyframe && e.last_show_frame && s.enable_ref_frame_mvs
 	}
 	h.disable_frame_end_update_cdf = false
 
@@ -406,8 +406,8 @@ prepare_frame_header :: proc(e: ^Encoder, is_altref: bool) {
 		}
 	}
 
-	h.tx_mode = h.coded_lossless ? av1.ONLY_4X4 : av1.TX_MODE_LARGEST
-	h.reference_select = false
+	h.tx_mode = h.coded_lossless ? av1.ONLY_4X4 : av1.TX_MODE_SELECT
+	h.reference_select = e.allow_comp
 	h.skip_mode_present = false
 	h.reduced_tx_set = true
 	for ref in av1.LAST_FRAME ..= av1.ALTREF_FRAME {
@@ -499,6 +499,9 @@ build_frame_header :: proc(e: ^Encoder, w: ^Raw_Writer) {
 			write_bits(w, int(h.interpolation_filter), 2)
 		}
 		write_flag(w, h.is_motion_mode_switchable)
+		if !h.error_resilient_mode && s.enable_ref_frame_mvs {
+			write_flag(w, h.use_ref_frame_mvs)
+		}
 	}
 
 	if !(s.reduced_still_picture_header || h.disable_cdf_update) {

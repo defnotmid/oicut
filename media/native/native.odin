@@ -1172,6 +1172,20 @@ decode_av1 :: proc(session: ^media.Session, s: ^State, packet: media.Packet, rec
 	return .None
 }
 
+// AV1 takes a quantizer index (0..255, 0 lossless) whose AC step table is
+// linear at low indices and cubic above 100; this piecewise curve aligns
+// QP 0..51 with H.264/H.265 quality (QP 18, 23, 28, 33, 38 -> 28, 60, 100, 140, 180).
+@(private)
+av1_q_index :: proc(qp: i32) -> int {
+	q := clamp(int(qp), 0, 51)
+	switch {
+	case q <= 18: return (q * 14 + 4) / 9
+	case q <= 23: return 28 + (q - 18) * 32 / 5
+	case q <= 38: return 60 + (q - 23) * 8
+	case:         return min(255, 180 + (q - 38) * 75 / 13)
+	}
+}
+
 @(private)
 open_av1_encoder :: proc(session: ^media.Session, s: ^State, config: media.Config, options: Options) -> media.Error {
 	gop := config.gop_size == 0 ? 15 : config.gop_size
@@ -1192,7 +1206,7 @@ open_av1_encoder :: proc(session: ^media.Session, s: ^State, config: media.Confi
 		height            = config.height,
 		bit_depth         = depth,
 		subsampling       = subsampling,
-		base_q_idx        = vp9_q_index(config.qp),
+		base_q_idx        = av1_q_index(config.qp),
 		keyframe_interval = gop,
 		tile_cols_log2    = 2,
 		ultrafast         = config.ultrafast,
