@@ -50,14 +50,14 @@ gpu/encode-h265/depth1	H.265, 900 1080p I420 frames through video.Writer, 1 pict
 gpu/encode-h265/depth3	H.265, 900 1080p I420 frames through video.Writer, 3 pictures in flight	1.531		ms/frame			2026-10-27	f38150cd+be185d	Radeon RX 9070 XT, AMD Ryzen 9 9900X3D	1.17	30fps
 gpu/encode-h265/ffmpeg-vulkan	H.265, 900 1080p frames, three pictures in flight against FFmpeg's Vulkan Video encoder	1.531	1.330	ms/frame	1.15	FFmpeg n9.0.2 Vulkan Video	2026-10-27	f38150cd+be185d	Radeon RX 9070 XT, AMD Ryzen 9 9900X3D	1.24	30fps
 gpu/encode-h265/ffmpeg-vulkan-bytes	H.265, 900 1080p frames at QP 23, size (oicut in MP4)	67301934	74640222	bytes	0.90	FFmpeg n9.0.2 Vulkan Video	2026-10-27	f38150cd+be185d	Radeon RX 9070 XT, AMD Ryzen 9 9900X3D	1.24	
-decode/h264-high	H.264 High, 8-bit, 1080p, 162 frames	1392.979	1062.725	ms	1.31	FFmpeg n9.0.2 h264	2026-10-27	f38150cd+be185d	AMD Ryzen 9 9900X3D	2.83	6.480000s
-decode/h264-high10	H.264 High 10, 4:2:0	1501.686	1190.028	ms	1.26	FFmpeg n9.0.2 h264	2026-10-27	f38150cd+be185d	AMD Ryzen 9 9900X3D	2.62	6.480000s
+decode/h264-high	H.264 High, 8-bit, 1080p, 162 frames	1399.631	1048.332	ms	1.34	FFmpeg n9.0.2 h264	2026-11-02	479d4c88	AMD Ryzen 9 9900X3D	3.52	6.480000s
+decode/h264-high10	H.264 High 10, 4:2:0	1489.521	1163.087	ms	1.28	FFmpeg n9.0.2 h264	2026-11-02	479d4c88	AMD Ryzen 9 9900X3D	3.77	6.480000s
 decode/h264-high422	H.264 High 4:2:2, 10-bit	1730.765	1384.757	ms	1.25	FFmpeg n9.0.2 h264	2026-10-27	f38150cd+be185d	AMD Ryzen 9 9900X3D	2.58	6.480000s
-decode/hevc-main	HEVC Main, 1080p	1411.587	1146.610	ms	1.23	FFmpeg n9.0.2 hevc	2026-10-27	f38150cd+be185d	AMD Ryzen 9 9900X3D	2.50	6.480000s
-decode/hevc-main10	HEVC Main 10	1544.904	1269.304	ms	1.22	FFmpeg n9.0.2 hevc	2026-10-27	f38150cd+be185d	AMD Ryzen 9 9900X3D	2.48	6.480000s
-decode/vp9-p0	VP9 profile 0, 1080p	992.322	793.754	ms	1.25	FFmpeg n9.0.2 vp9	2026-10-29	4a0b9949+6f3940	AMD Ryzen 9 9900X3D	3.06	6.480000s
+decode/hevc-main	HEVC Main, 1080p	1381.697	1110.669	ms	1.24	FFmpeg n9.0.2 hevc	2026-11-02	479d4c88	AMD Ryzen 9 9900X3D	4.03	6.480000s
+decode/hevc-main10	HEVC Main 10	1490.078	1242.171	ms	1.20	FFmpeg n9.0.2 hevc	2026-11-02	479d4c88	AMD Ryzen 9 9900X3D	4.03	6.480000s
+decode/vp9-p0	VP9 profile 0, 1080p	988.012	787.517	ms	1.25	FFmpeg n9.0.2 vp9	2026-11-02	479d4c88	AMD Ryzen 9 9900X3D	4.09	6.480000s
 decode/vp9-p0-libvpx	VP9 profile 0, 1080p	976.040	844.439	ms	1.16	libvpx 1.17.0	2026-10-29	4a0b9949+fdb1e8	AMD Ryzen 9 9900X3D	0.98	6.480000s
-decode/vp9-p2	VP9 profile 2, 10-bit	1139.009	1068.553	ms	1.07	FFmpeg n9.0.2 vp9	2026-10-29	4a0b9949+6f3940	AMD Ryzen 9 9900X3D	2.99	6.480000s
+decode/vp9-p2	VP9 profile 2, 10-bit	1070.331	1019.405	ms	1.05	FFmpeg n9.0.2 vp9	2026-11-02	479d4c88	AMD Ryzen 9 9900X3D	4.20	6.480000s
 decode/vp9-p2-libvpx	VP9 profile 2, 10-bit	1111.594	1198.954	ms	0.93	libvpx 1.17.0	2026-10-29	4a0b9949+fdb1e8	AMD Ryzen 9 9900X3D	1.04	6.480000s
 decode/prores-422hq	ProRes 422 HQ, 1080p	1836.819	1721.763	ms	1.07	FFmpeg n9.0.2 prores	2026-10-27	f38150cd+be185d	AMD Ryzen 9 9900X3D	1.35	6.480000s
 decode/prores-4444	ProRes 4444, 10-bit	2534.031	3081.034	ms	0.82	FFmpeg n9.0.2 prores	2026-10-27	f38150cd+be185d	AMD Ryzen 9 9900X3D	1.23	6.480000s
@@ -77,13 +77,13 @@ decode/streams-h264/16	1080p H.264 High, 162 frames, 16 streams of one decoder t
 decode/streams-h265/1	1080p HEVC Main, 162 frames, 1 stream of one decoder thread each	112.6	140.7	fps	1.25	FFmpeg n9.0.2 hevc	2026-10-27	f38150cd+d015dd	AMD Ryzen 9 9900X3D	8.32	25fps
 decode/streams-h265/12	1080p HEVC Main, 162 frames, 12 streams of one decoder thread each	879.0	1245.8	fps	1.42	FFmpeg n9.0.2 hevc	2026-10-27	f38150cd+d015dd	AMD Ryzen 9 9900X3D	11.33	25fps
 decode/streams-h265/16	1080p HEVC Main, 162 frames, 16 streams of one decoder thread each	966.2	1448.6	fps	1.50	FFmpeg n9.0.2 hevc	2026-10-27	f38150cd+d015dd	AMD Ryzen 9 9900X3D	13.90	25fps
-encode/h264/speed	H.264, 1080p, 54 frames, one core, 4 slices (x264: baseline profile, one reference, a keyframe every 15), QP 27	29.5	31.3	fps	1.06	x264 0.165 (b35605a), medium with the same tools	2026-10-27	f38150cd+d015dd	AMD Ryzen 9 9900X3D	9.41	25fps
-encode/h264/bd-rate	H.264, 1080p, 54 frames, one core, 4 slices (x264: baseline profile, one reference, a keyframe every 15), QP 22 to 37	3.78		% BD-rate		x264 0.165 (b35605a), medium with the same tools	2026-10-27	f38150cd+d015dd	AMD Ryzen 9 9900X3D	9.41	
+encode/h264/speed	H.264, 1080p, 54 frames, one core, 4 slices (x264: baseline profile, one reference, a keyframe every 15), QP 27	31.7	32.0	fps	1.01	x264 0.165 (b35605a), medium with the same tools	2026-11-02	479d4c88	AMD Ryzen 9 9900X3D	5.01	25fps
+encode/h264/bd-rate	H.264, 1080p, 54 frames, one core, 4 slices (x264: baseline profile, one reference, a keyframe every 15), QP 22 to 37	3.94		% BD-rate		x264 0.165 (b35605a), medium with the same tools	2026-11-02	479d4c88	AMD Ryzen 9 9900X3D	5.01	
 encode/h264-16/speed	H.264, 1080p, 54 frames, 16 slices on 16 workers, QP 27	176.5	225.6	fps	1.28	x264 0.165 (b35605a), medium with the same tools	2026-10-27	f38150cd+d015dd	AMD Ryzen 9 9900X3D	9.94	25fps
-encode/h265/speed	H.265, 1080p, 54 frames, one core (x265: P frames only, one reference, 64 to 8 CUs, no AMP or rectangular), QP 27	4.8	8.2	fps	1.71	x265 4.2, medium with the same tools	2026-10-27	f38150cd+d015dd	AMD Ryzen 9 9900X3D	3.57	25fps
-encode/h265/bd-rate	H.265, 1080p, 54 frames, one core (x265: P frames only, one reference, 64 to 8 CUs, no AMP or rectangular), QP 22 to 37	38.61		% BD-rate		x265 4.2, medium with the same tools	2026-10-27	f38150cd+d015dd	AMD Ryzen 9 9900X3D	3.57	
-encode/vp9/speed	VP9, 1080p, 54 frames, one core, four tile columns (libvpx: good, cpu-used 4, no lag or alt-ref), q 100 against cq-level 25	6.384	7.0	fps	1.10	libvpx 1.17.0	2026-10-29	4a0b9949+6f3940	AMD Ryzen 9 9900X3D	2.16	25fps
-encode/vp9/bd-rate	VP9, 1080p, 54 frames, one core, four tile columns (libvpx: good, cpu-used 4, no lag or alt-ref), q 60 to 180 against cq-level 15 to 45	3.51		% BD-rate		libvpx 1.17.0	2026-10-29	4a0b9949+6f3940	AMD Ryzen 9 9900X3D	2.16	
+encode/h265/speed	H.265, 1080p, 54 frames, one core (x265: P frames only, one reference, 64 to 8 CUs, no AMP or rectangular), QP 27	6.0	8.2	fps	1.37	x265 4.2, medium with the same tools	2026-11-02	479d4c88	AMD Ryzen 9 9900X3D	3.63	25fps
+encode/h265/bd-rate	H.265, 1080p, 54 frames, one core (x265: P frames only, one reference, 64 to 8 CUs, no AMP or rectangular), QP 22 to 37	34.38		% BD-rate		x265 4.2, medium with the same tools	2026-11-02	479d4c88	AMD Ryzen 9 9900X3D	3.63	
+encode/vp9/speed	VP9, 1080p, 54 frames, one core, four tile columns (libvpx: good, cpu-used 4, no lag or alt-ref), q 100 against cq-level 25	7.327	6.9	fps	0.94	libvpx 1.17.0	2026-11-02	479d4c88	AMD Ryzen 9 9900X3D	3.89	25fps
+encode/vp9/bd-rate	VP9, 1080p, 54 frames, one core, four tile columns (libvpx: good, cpu-used 4, no lag or alt-ref), q 60 to 180 against cq-level 15 to 45	3.62		% BD-rate		libvpx 1.17.0	2026-11-02	479d4c88	AMD Ryzen 9 9900X3D	3.89	
 encode/vp9-workers/q100-1w	VP9, the 1080p synthetic animation, q 100 colour, 16 frames, 1 worker	57.000		fps			2026-10-29	4a0b9949+0729a0	AMD Ryzen 9 9900X3D	2.34	30fps
 encode/vp9-workers/q100-4w	VP9, the 1080p synthetic animation, q 100 colour, 16 frames, 4 workers	164.562		fps			2026-10-29	4a0b9949+0729a0	AMD Ryzen 9 9900X3D	2.34	30fps
 encode/vp9-workers/lossless-alpha-1w	VP9, the 1080p synthetic animation, lossless colour and alpha, 8 frames, 1 worker	83.224		fps			2026-10-29	4a0b9949+0729a0	AMD Ryzen 9 9900X3D	2.34	30fps
@@ -116,3 +116,4 @@ alpha/vp9/fps-1t	VP9, GOP 60, two-pass, 1080p, 1 thread, frames through RGBA	296
 alpha/vp9/seek-1t	VP9, GOP 60, two-pass, 1080p, 1 thread, random frame_at seek	69.00		ms			2026-10-29	4a0b9949+fdb1e8	AMD Ryzen 9 9900X3D	1.44	
 alpha/vp9/fps-8t	VP9, GOP 60, two-pass, 1080p, 8 threads, frames through RGBA	605.9		fps			2026-10-29	4a0b9949+fdb1e8	AMD Ryzen 9 9900X3D	1.64	30fps
 alpha/vp9/seek-8t	VP9, GOP 60, two-pass, 1080p, 8 threads, random frame_at seek	30.50		ms			2026-10-29	4a0b9949+fdb1e8	AMD Ryzen 9 9900X3D	1.64	
+decode/av1-720p10	AV1 Main, 10-bit, 720p	566.580	415.141	ms	1.36	dav1d 1.5.4	2026-11-02	479d4c88	AMD Ryzen 9 9900X3D	4.79	6.480000s
