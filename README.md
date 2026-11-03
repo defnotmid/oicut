@@ -84,7 +84,7 @@ video.destroy(&w)
 Each package's README covers its API, limits and how it was verified.
 
 Requirements:
-- A recent Odin nightly; oicut is built and tested with `dev-2026-10`.
+- A recent Odin nightly; oicut is built and tested with `dev-2026-11a`.
 - For hardware video, a Vulkan driver with Vulkan Video (loaded at runtime;
   without one the native codecs are used) or macOS VideoToolbox. Without
   `-define:OICUT_PATENTED=true`, H.264 and H.265 have only these.

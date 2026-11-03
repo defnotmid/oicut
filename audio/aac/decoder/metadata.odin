@@ -158,11 +158,12 @@ read_fill :: proc(d: ^Decoder, r: ^aac.Bit_Reader) {
 @(private)
 resolve_frame_dynamic_range :: proc(
 	d: ^Decoder,
+	base: Dynamic_Range,
 	old_layout: ^aac.Channel_Layout,
 	old_program: ^aac.Program_Config,
 ) -> Dynamic_Range {
 	f := &d.frame
-	state := f.base_drc^
+	state := base
 	if f.layout != old_layout^ {
 		previous := state
 		for wanted in f.layout.elements[:f.layout.element_count] {

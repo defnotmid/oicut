@@ -20,7 +20,6 @@ Frame_Info :: struct {
 	program:                                      aac.Program_Config,
 	explicit_layout:                              bool,
 	tagged_drc_present:                           [16]bool,
-	base_drc:                                     ^Dynamic_Range,
 	crc:                                          u16,
 }
 
@@ -135,7 +134,6 @@ parse_raw_block :: proc(
 	program: aac.Program_Config,
 	explicit_layout: bool,
 	allow_program: bool,
-	drc: ^Dynamic_Range,
 	protected: bool,
 	crc: u16,
 ) -> (
@@ -146,7 +144,6 @@ parse_raw_block :: proc(
 	f.element_count, f.channel_count, f.coupling_count = 0, 0, 0
 	f.layout, f.program, f.explicit_layout, f.crc = layout, program, explicit_layout, crc
 	f.tagged_drc_present = {}
-	f.base_drc = drc
 	r := aac.Bit_Reader {
 		data = data,
 	}
@@ -437,7 +434,7 @@ commit_staged_banks :: proc(d: ^Decoder, staged: ^[16]bool) {
 @(private)
 commit_frame_metadata :: proc(d: ^Decoder) {
 	f := &d.frame
-	d.dynamic_range = resolve_frame_dynamic_range(d, &d.layout, &d.program)
+	d.dynamic_range = resolve_frame_dynamic_range(d, d.dynamic_range, &d.layout, &d.program)
 	d.layout, d.program, d.explicit_layout = f.layout, f.program, f.explicit_layout
 }
 
@@ -463,7 +460,6 @@ decode_raw_unit :: proc(
 		d.program,
 		d.explicit_layout,
 		d.allow_in_band_program,
-		&d.dynamic_range,
 		false,
 		0,
 	)
@@ -534,7 +530,6 @@ decode_adts_frame :: proc(
 			program,
 			explicit_layout,
 			allow_program,
-			&d.dynamic_range,
 			h.protected,
 			crc,
 		)
@@ -570,7 +565,6 @@ decode_adts_frame :: proc(
 			program,
 			explicit_layout,
 			allow_program,
-			&drc,
 			h.protected,
 			crc,
 		)
@@ -581,7 +575,7 @@ decode_adts_frame :: proc(
 		}
 		stage_coupling_banks(d, &staged_coupling)
 		if pe = render_raw_block(d, d.pending_bank[:], d.pending_coupling_bank[:], &seed, d.pending_pcm[block * n:(block + 1) * n], layout); pe != .None do return 0, 0, pe
-		drc = resolve_frame_dynamic_range(d, &layout, &program)
+		drc = resolve_frame_dynamic_range(d, drc, &layout, &program)
 		layout, program, explicit_layout = d.frame.layout, d.frame.program, d.frame.explicit_layout
 		position += bytes
 	}

@@ -23,7 +23,7 @@ encode_round_trips_through_core_image :: proc(t: ^testing.T) {
 		testing.expect_value(t, img.width, w)
 		testing.expect_value(t, img.height, h)
 		testing.expect_value(t, img.channels, 4)
-		testing.expect(t, bytes.equal(img.pixels.buf[:], pixels), "decoded pixels differ")
+		testing.expect(t, bytes.equal(img.pixels[:], pixels), "decoded pixels differ")
 	}
 	_, err := encode(nil, 1, 1)
 	testing.expect_value(t, err, Error.Invalid_Argument)

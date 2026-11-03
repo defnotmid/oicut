@@ -208,12 +208,12 @@ decode_core :: proc(data: []u8, format: Format, pixels: []u8) -> Error {
 	if e != nil do return .Invalid
 	n := src.width * src.height
 	ch := src.channels
-	if ch < 1 || ch > 4 || src.depth != 8 && src.depth != 16 || len(src.pixels.buf) < n * ch * src.depth / 8 do return .Invalid
+	if ch < 1 || ch > 4 || src.depth != 8 && src.depth != 16 || len(src.pixels) < n * ch * src.depth / 8 do return .Invalid
 	if len(pixels) < n * 4 do return .Invalid
 	if src.depth == 8 {
-		convert_samples(pixels[:n * 4], src.pixels.buf[:n * ch], ch)
+		convert_samples(pixels[:n * 4], src.pixels[:n * ch], ch)
 	} else {
-		convert_samples(pixels[:n * 4], slice.reinterpret([]u16, src.pixels.buf[:])[:n * ch], ch)
+		convert_samples(pixels[:n * 4], slice.reinterpret([]u16, src.pixels[:])[:n * ch], ch)
 	}
 	return .None
 }

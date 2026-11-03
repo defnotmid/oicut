@@ -31,7 +31,6 @@ decode_mux_access_units :: proc(
 			program,
 			explicit_layout,
 			false,
-			&d.dynamic_range,
 			false,
 			0,
 		)
@@ -56,7 +55,6 @@ decode_mux_access_units :: proc(
 			program,
 			explicit_layout,
 			false,
-			&drc,
 			false,
 			0,
 		)
@@ -64,7 +62,7 @@ decode_mux_access_units :: proc(
 		if bytes != len(unit) do return 0, .Invalid_Data
 		stage_coupling_banks(d, &staged_coupling)
 		if e = render_raw_block(d, d.pending_bank[:], d.pending_coupling_bank[:], &seed, d.pending_pcm[index * n:(index + 1) * n], history_layout); e != .None do return 0, e
-		drc = resolve_frame_dynamic_range(d, &history_layout, &history_program)
+		drc = resolve_frame_dynamic_range(d, drc, &history_layout, &history_program)
 		layout, program, explicit_layout = d.frame.layout, d.frame.program, d.frame.explicit_layout
 		history_layout, history_program = layout, program
 	}
