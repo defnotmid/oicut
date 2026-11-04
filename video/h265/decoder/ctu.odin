@@ -90,7 +90,6 @@ Ctu_Decoder :: struct($Sample: typeid) {
 	qp_delta:          i32,
 	bypass:            bool,
 	cur_intra:         bool,
-	stat_coef:         [4]u8,
 	coef:              [32 * 32]i32,
 	cur_x:             int,
 	cur_y:             int,
@@ -128,12 +127,17 @@ Ctu_Decoder :: struct($Sample: typeid) {
 	dep_slice_addr_rs: int,
 
 	// The 9.3.1 wavefront context handoff.
-	saved:             [CABAC_N_CONTEXTS]u8,
+	saved:             [CABAC_N_STATE]u8,
 	has_saved:         bool,
 	// The context state a slice segment ended with, for the dependent slice
 	// segment that carries on from it (9.3.1).
-	dep_saved:         [CABAC_N_CONTEXTS]u8,
+	dep_saved:         [CABAC_N_STATE]u8,
 	has_dep_saved:     bool,
+	// CuQpOffsetCb and CuQpOffsetCr of 7.4.9.14, and whether this chroma
+	// quantization group has coded them.
+	cu_cb_offset:      i32,
+	cu_cr_offset:      i32,
+	cu_chroma_coded:   bool,
 }
 
 // Ctu_Shape is everything the grid sizes, the 6.5.1 tile scan and the 6.5.2
@@ -574,6 +578,11 @@ coding_quadtree :: proc(d: ^Ctu_Decoder($Sample), x, y, log2_size, depth: int) -
 		d.qp_y_cur = d.qp_y_pred
 	}
 
+	if d.sh.cu_chroma_qp_offset &&
+	   log2_size >= int(d.s.ctb_log2_size_y) - int(d.p.diff_cu_chroma_qp_offset_depth) {
+		d.cu_chroma_coded = false
+	}
+
 	if !split do return coding_unit(d, x, y, log2_size, depth)
 
 	half := 1 << uint(log2_size - 1)
@@ -644,6 +653,23 @@ parse_cu_qp_delta :: proc(d: ^Ctu_Decoder($Sample)) {
 	off := 6 * (i32(d.s.bit_depth_luma) - 8)
 	m := 52 + off
 	d.qp_y_cur = ((d.qp_y_pred + d.qp_delta + 52 + 2 * off) % m + m) % m - off
+}
+
+// parse_cu_chroma_qp_offset reads cu_chroma_qp_offset_flag and
+// cu_chroma_qp_offset_idx, 7.3.8.10 / 9.3.3.8.
+parse_cu_chroma_qp_offset :: proc(d: ^Ctu_Decoder($Sample)) {
+	d.cu_chroma_coded = true
+	if cabac_decode_bin(&d.c, ctxCUChromaQPOffsetFlag) == 0 {
+		d.cu_cb_offset, d.cu_cr_offset = 0, 0
+		return
+	}
+	c_max := int(d.p.chroma_qp_offset_list_len) - 1
+	idx := 0
+	for idx < c_max && cabac_decode_bin(&d.c, ctxCUChromaQPOffsetIDX) != 0 {
+		idx += 1
+	}
+	d.cu_cb_offset = d.p.cb_qp_offset_list[idx]
+	d.cu_cr_offset = d.p.cr_qp_offset_list[idx]
 }
 
 coding_unit :: proc(d: ^Ctu_Decoder($Sample), x, y, log2_size, depth: int) -> bool {
@@ -1050,6 +1076,10 @@ transform_unit :: proc(
 		parse_cu_qp_delta(d)
 	}
 
+	if cbf_chroma && !d.bypass && d.sh.cu_chroma_qp_offset && !d.cu_chroma_coded {
+		parse_cu_chroma_qp_offset(d)
+	}
+
 	mark_tu(d, x, y, 1 << uint(log2_size), 1 << uint(log2_size), cbf_luma)
 
 	if !reconstruct(d, x, y, log2_size, 0, mode, cbf_luma) do return false
@@ -1227,7 +1257,7 @@ reconstruct :: proc(
 		d.sh,
 		d.coef[:n * n],
 		rb,
-		&d.stat_coef,
+		(^[4]u8)(&d.c.state[STAT_COEFF]),
 	)
 	if !ok do return false
 
@@ -1253,8 +1283,8 @@ reconstruct :: proc(
 	off_y := 6 * (bit_depth - 8)
 	qp_scaled := int(d.qp_y_cur) + off_y
 	if c_idx > 0 {
-		off := d.p.cb_qp_offset + d.sh.cb_qp_offset
-		if c_idx == 2 do off = d.p.cr_qp_offset + d.sh.cr_qp_offset
+		off := d.p.cb_qp_offset + d.sh.cb_qp_offset + d.cu_cb_offset
+		if c_idx == 2 do off = d.p.cr_qp_offset + d.sh.cr_qp_offset + d.cu_cr_offset
 
 		off_c := 6 * (bit_depth - 8)
 		qp_scaled =

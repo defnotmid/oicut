@@ -747,3 +747,42 @@ test_loas_subframe_and_mux_config_transaction :: proc(t: ^testing.T) {
 		actual[:],
 	); testing.expect_value(t, error, Error.None)
 }
+
+// Blocks of a multi-block ADTS frame overlap as the same blocks decoded alone,
+// whatever instance tag the stream's elements carry: the first block compares
+// its layout with the last frame's, not with the header's default.
+@(test)
+test_adts_multiple_blocks_keep_history_with_a_tag :: proc(t: ^testing.T) {
+	config := Config {
+		sample_rate = 48000,
+		channels    = 2,
+	}
+	for tag in ([2]u8{0, 3}) {
+		d, oracle := new(Decoder), new(Decoder)
+		defer free(d)
+		defer free(oracle)
+		testing.expect_value(t, init_decoder(d, config), Error.None)
+		testing.expect_value(t, init_decoder(oracle, config), Error.None)
+		one, two, packet: [dynamic]u8
+		defer {delete(one); delete(two); delete(packet)}
+		first_ranges, first_count := feature_crc_block(&one, true, true)
+		second_ranges, second_count := feature_crc_block(&two, true, false)
+		// The element instance tag follows the 3-bit element ID.
+		one[0] = one[0] & 0xE1 | tag << 1
+		two[0] = two[0] & 0xE1 | tag << 1
+		entries := [2]aac.ADTS_Block{{one[:], first_ranges[:first_count]}, {two[:], second_ranges[:second_count]}}
+		testing.expect_value(t, aac.append_adts_blocks(&packet, config, entries[:], false), Error.None)
+		actual, expected: [2 * 2048]f32
+		for frame in 0 ..< 3 {
+			_, _, err := decode_adts_frame(d, packet[:], actual[:])
+			testing.expect_value(t, err, Error.None)
+			for block in 0 ..< 2 {
+				_, e := decode_frame(oracle, entries[block].data, expected[block * 2048:(block + 1) * 2048])
+				testing.expect_value(t, e, Error.None)
+			}
+			differing := 0
+			for v, i in actual do if v != expected[i] do differing += 1
+			testing.expectf(t, differing == 0, "tag %d frame %d: %d samples differ", tag, frame, differing)
+		}
+	}
+}

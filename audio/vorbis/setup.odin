@@ -101,6 +101,9 @@ read_setup :: proc(s: ^Setup, info: Info, packet: []u8, allocator: mem.Allocator
 	s.tables = tables
 	if len(packet) < 7 || packet[0] != 5 || string(packet[1:7]) != "vorbis" do return .Invalid
 	s.fast.allocator = allocator
+	// Slot 0 stays zero, an invalid code: a book with no entries keeps its
+	// zeroed offset and bits, so reading it overruns the packet.
+	if resize(&s.fast, 1) != nil do return .Out_Of_Memory
 	s.long_codes.allocator = allocator
 	s.long_entries.allocator = allocator
 	s.values.allocator = allocator

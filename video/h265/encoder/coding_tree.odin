@@ -1032,6 +1032,7 @@ write_inter_leaf_rqt :: proc(
 
 	if cu.skipped {
 		write_merge_idx(cabac, int(cu.merge_idx))
+		if !search do return 0
 		return reconstruct_prediction(enc, x, y, size, mv, int(cu.ref_idx[0]))
 	}
 
@@ -1357,6 +1358,7 @@ write_inter_leaf_b_rqt :: proc(
 
 	if cu.skipped {
 		write_merge_idx(cabac, int(cu.merge_idx))
+		if !search do return 0
 		return reconstruct_prediction_b(enc, x, y, size, cu.pred, cu.mv, cu.ref_idx)
 	}
 

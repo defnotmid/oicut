@@ -96,7 +96,7 @@ decode_frame :: proc(d: ^Decoder, data: []u8) -> (f: Frame, err: Error) {
 		for &s in d.spectrum[:nch] do s = {}
 		if f.complete do decode_granule(d, &m, d.granules[gr * nch:][:nch], h)
 		for ch in 0 ..< nch {
-			hybrid_synthesis(d.spectrum[ch][:], d.overlap[ch][:], d.slots[ch][:], &d.granules[gr * nch + ch], h)
+			hybrid_synthesis(d.spectrum[ch][:], d.overlap[ch][:], d.slots[ch][:], &d.granules[gr * nch + ch])
 		}
 		synthesize(d, nch, d.pcm[0][gr * 576:][:576], d.pcm[1][gr * 576:][:576])
 	}
@@ -152,8 +152,8 @@ read_side_info :: proc(b: ^Bits, granules: []Granule, h: Header) -> (main_begin:
 			if g.block_type == 2 {
 				if g.mixed {
 					g.sfb = SFB_MIXED[row][:]
-					g.long_bands = mpeg1 ? 8 : 6
-					g.short_bands = 30
+					g.long_bands = mpeg1 ? 8 : row == 1 ? 3 : 6
+					g.short_bands = row == 1 ? 36 : 30
 				} else {
 					g.region_count[0] = 8
 					g.sfb = SFB_SHORT[row][:]
@@ -402,7 +402,7 @@ decode_granule :: proc(d: ^Decoder, m: ^Bits, granules: []Granule, h: Header) {
 		g := &granules[ch]
 		alias_bands := 31
 		if g.short_bands != 0 {
-			low := mixed_subbands(g, h)
+			low := mixed_subbands(g)
 			alias_bands = low - 1
 			reorder(d.spectrum[ch][low * 18:], g.sfb[g.long_bands:])
 		}
@@ -411,10 +411,10 @@ decode_granule :: proc(d: ^Decoder, m: ^Bits, granules: []Granule, h: Header) {
 }
 
 // The lowest subbands that a mixed block transforms with the normal long
-// window, whatever its block type: 2, or 4 at MPEG-2.5's 8 kHz.
+// window, whatever its block type.
 @(private)
-mixed_subbands :: proc(g: ^Granule, h: Header) -> int {
-	return g.mixed ? (h.rate_index == 2 ? 4 : 2) : 0
+mixed_subbands :: proc(g: ^Granule) -> int {
+	return g.mixed ? 2 : 0
 }
 
 @(private)
@@ -514,8 +514,8 @@ antialias :: proc(x: []f32, bands: int) #no_bounds_check {
 // Each transform accumulates whole rows of its cosine table, so the inner
 // loops run over contiguous outputs.
 @(private)
-hybrid_synthesis :: proc(x, overlap, slots: []f32, g: ^Granule, h: Header) #no_bounds_check {
-	low := mixed_subbands(g, h)
+hybrid_synthesis :: proc(x, overlap, slots: []f32, g: ^Granule) #no_bounds_check {
+	low := mixed_subbands(g)
 	for sb in 0 ..< 32 {
 		in_ := x[sb * 18:][:18]
 		saved := overlap[sb * 18:][:18]

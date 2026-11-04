@@ -79,3 +79,35 @@ identification_header :: proc(t: ^testing.T) {
 		testing.expect(t, e != .None)
 	}
 }
+
+// A book whose entries are all unused can be read by a stream: it overruns the
+// packet, and never indexes the code tables.
+@(test)
+a_book_with_no_codes_overruns :: proc(t: ^testing.T) {
+	packet: [32]u8
+	copy(packet[:], "\x05vorbis")
+	at := 7 * 8
+	put :: proc(p: []u8, at: ^int, v: u32, n: int) {
+		for i in 0 ..< n {
+			if v >> uint(i) & 1 != 0 do p[at^ / 8] |= 1 << uint(at^ % 8)
+			at^ += 1
+		}
+	}
+	put(packet[:], &at, 0, 8) // one codebook
+	put(packet[:], &at, 0x564342, 24)
+	put(packet[:], &at, 1, 16) // dimensions
+	put(packet[:], &at, 2, 24) // entries
+	put(packet[:], &at, 0, 1) // not ordered
+	put(packet[:], &at, 1, 1) // sparse
+	put(packet[:], &at, 0, 2) // neither entry used
+	put(packet[:], &at, 0, 4) // no lookup
+	s: Setup
+	defer destroy_setup(&s, context.allocator)
+	read_setup(&s, {}, packet[:], context.allocator) // what follows the book is not a setup
+	testing.expect_value(t, s.books[0].single, -1)
+	testing.expect(t, len(s.fast) > 0 && s.fast[s.books[0].fast] == 0)
+	stream := [8]u8{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+	b := Bits{data = stream[:]}
+	testing.expect_value(t, decode_entry(&s, &s.books[0], &b), -1)
+	testing.expect(t, b.overrun)
+}

@@ -28,3 +28,14 @@ encode_round_trips_through_core_image :: proc(t: ^testing.T) {
 	_, err := encode(nil, 1, 1)
 	testing.expect_value(t, err, Error.Invalid_Argument)
 }
+
+// Dimensions whose byte count wraps a 64-bit int are refused, not taken as a
+// fit for an empty buffer.
+@(test)
+huge_dimensions_are_refused :: proc(t: ^testing.T) {
+	testing.expect(t, !valid(nil, 1 << 31, 1 << 31))
+	testing.expect(t, !valid(nil, 1 << 31 - 1, 1 << 31 - 1))
+	pixels: [16]u8
+	testing.expect(t, valid(pixels[:], 2, 2))
+	testing.expect(t, !valid(pixels[:], 2, 3))
+}

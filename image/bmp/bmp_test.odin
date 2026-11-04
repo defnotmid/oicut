@@ -51,3 +51,35 @@ rows_bottom_up_top_down_and_os2_header :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+// An OS/2 bitmap's palette lies between its 12-byte header and the pixels: all
+// of it counts, however few entries.
+@(test)
+os2_palettes_count_every_entry :: proc(t: ^testing.T) {
+	for colours in ([2]int{2, 256}) {
+		b: [dynamic]u8
+		defer delete(b)
+		put16 :: proc(b: ^[dynamic]u8, v: int) {append(b, u8(v), u8(v >> 8))}
+		put32 :: proc(b: ^[dynamic]u8, v: int) {put16(b, v); put16(b, v >> 16)}
+		bpp := colours == 2 ? 1 : 8
+		offset := 26 + colours * 3
+		append(&b, 'B', 'M')
+		put32(&b, offset + 4)
+		put32(&b, 0)
+		put32(&b, offset)
+		put32(&b, 12)
+		put16(&b, 1)
+		put16(&b, 1)
+		put16(&b, 1)
+		put16(&b, bpp)
+		for i in 0 ..< colours do append(&b, u8(i), u8(i), u8(i))
+		last := colours - 1
+		append(&b, colours == 2 ? 0x80 : u8(last), 0, 0, 0)
+		pixels, w, h, err := decode(b[:])
+		testing.expect_value(t, err, Error.None)
+		if err != .None do continue
+		defer delete(pixels)
+		testing.expect(t, w == 1 && h == 1)
+		testing.expect_value(t, pixels[0], u8(last))
+	}
+}

@@ -286,10 +286,11 @@ decode_main_image :: proc(l: ^Lossless, width, height: int, into: []u32 = nil) -
 	seen: bit_set[Transform_Kind]
 	coded_width := width
 	for read_bits(&l.br, 1) == 1 {
+		kind := Transform_Kind(read_bits(&l.br, 2))
+		if kind in seen do return nil, .Invalid
+		seen += {kind}
 		t := &transforms[count]
-		t.kind = Transform_Kind(read_bits(&l.br, 2))
-		if t.kind in seen do return nil, .Invalid
-		seen += {t.kind}
+		t.kind = kind
 		t.width = coded_width
 		count += 1
 		switch t.kind {

@@ -27,10 +27,11 @@ partition_weights :: proc(
 		picture_parameters.weighted_bipred_idc == 2 &&
 		dir == h264.Prediction_Direction.Bidirectional
 	if !explicit && !implicit do return weights, false
+	r0, r1 := max(int(ref[0]), 0), max(int(ref[1]), 0)
 	if implicit {
 		// 8.4.2.3.1 implicit: weights from POC distances
 		w0, w1: i32 = 32, 32
-		pic0, pic1 := decoder.state.ref_list[0][ref[0]], decoder.state.ref_list[1][ref[1]]
+		pic0, pic1 := decoder.state.ref_list[0][r0], decoder.state.ref_list[1][r1]
 		if pic0 != nil && pic1 != nil && !pic0.is_long_ref && !pic1.is_long_ref {
 			tb := clamp(decoder.state.curr.poc - pic0.poc, -128, 127)
 			td := clamp(pic1.poc - pic0.poc, -128, 127)
@@ -48,7 +49,6 @@ partition_weights :: proc(
 	}
 	// Offsets are in 8-bit units, scaled to the bit depth (8-291 to 8-297).
 	table := &header.weights
-	r0, r1 := max(int(ref[0]), 0), max(int(ref[1]), 0)
 	scale := uint(decoder.bit_depth - 8)
 	weights[0] = {
 		table.luma_weight[0][r0],

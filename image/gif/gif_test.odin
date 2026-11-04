@@ -82,6 +82,11 @@ lzw :: proc(indices: []u8, min_size: int) -> (out: [dynamic]u8) {
 		}
 	}
 	emit(&out, &bits, &count, clear_code, size)
+	if len(indices) == 0 {
+		emit(&out, &bits, &count, clear_code + 1, size)
+		if count > 0 do append(&out, u8(bits))
+		return out
+	}
 	w := int(indices[0])
 	for v in indices[1:] {
 		if code, ok := table[{w, int(v)}]; ok {
@@ -206,4 +211,114 @@ truncated_input :: proc(t: ^testing.T) {
 		for _ in 0 ..< a.frame_count do if _, err := next_frame(&a); err != .None do break
 		destroy_animation(&a)
 	}
+}
+
+// A frame with no pixels draws nothing and stops nothing: stb and browsers
+// keep the animation.
+@(test)
+zero_size_frames_are_kept :: proc(t: ^testing.T) {
+	green, blue: [16]u8
+	for i in 0 ..< 16 do green[i], blue[i] = 1, 2
+	for first_empty in ([2]bool{false, true}) {
+		empty := Test_Frame{transparent = -1}
+		full := Test_Frame{width = 4, height = 4, indices = blue[:], transparent = -1}
+		frames := first_empty ? [3]Test_Frame{empty, full, full} : [3]Test_Frame{{width = 4, height = 4, indices = green[:], transparent = -1}, empty, full}
+		data := write(4, 4, 0, frames[:])
+		defer delete(data)
+		img, err := decode(data[:])
+		testing.expect_value(t, err, Error.None)
+		if err != .None do continue
+		first := picture(first_empty ? "................" : "GGGGGGGGGGGGGGGG")
+		defer delete(first)
+		testing.expect(t, slice.equal(img.pixels, first[:]))
+		destroy_image(&img)
+		a: Animation
+		testing.expect_value(t, init_animation(&a, data[:]), Error.None)
+		defer destroy_animation(&a)
+		testing.expect_value(t, a.frame_count, 3)
+		expected := first_empty ? [3]string{"................", "BBBBBBBBBBBBBBBB", "BBBBBBBBBBBBBBBB"} : [3]string{"GGGGGGGGGGGGGGGG", "GGGGGGGGGGGGGGGG", "BBBBBBBBBBBBBBBB"}
+		for want, k in expected {
+			frame, ferr := next_frame(&a)
+			testing.expect_value(t, ferr, Error.None)
+			pixels := picture(want)
+			defer delete(pixels)
+			testing.expectf(t, slice.equal(frame.pixels, pixels[:]), "frame %d: %v", k, frame.pixels)
+		}
+	}
+}
+
+// A frame whose data ends early draws what it holds and leaves the rest of
+// its rectangle alone, not colour 0: as stb, in stream order when interlaced.
+@(test)
+short_frames_leave_the_rest :: proc(t: ^testing.T) {
+	green, white: [32]u8
+	for i in 0 ..< 32 do green[i], white[i] = 1, 3
+	{
+		frames := [2]Test_Frame {
+			{width = 4, height = 4, indices = green[:16], transparent = -1},
+			{width = 4, height = 4, indices = white[:6], transparent = -1},
+		}
+		data := write(4, 4, 0, frames[:])
+		defer delete(data)
+		first := picture("GGGGGGGGGGGGGGGG")
+		defer delete(first)
+		img, err := decode(data[:])
+		testing.expect_value(t, err, Error.None)
+		testing.expect(t, slice.equal(img.pixels, first[:]))
+		destroy_image(&img)
+		a: Animation
+		testing.expect_value(t, init_animation(&a, data[:]), Error.None)
+		defer destroy_animation(&a)
+		next_frame(&a)
+		frame, ferr := next_frame(&a)
+		testing.expect_value(t, ferr, Error.None)
+		want := picture("WWWW WWGG GGGG GGGG")
+		defer delete(want)
+		testing.expectf(t, slice.equal(frame.pixels, want[:]), "%v", frame.pixels)
+	}
+	{ // The first frame alone: the canvas stays transparent.
+		frames := [1]Test_Frame{{width = 4, height = 4, indices = white[:6], transparent = -1}}
+		data := write(4, 4, 0, frames[:])
+		defer delete(data)
+		img, err := decode(data[:])
+		testing.expect_value(t, err, Error.None)
+		want := picture("WWWW WW.. .... ....")
+		defer delete(want)
+		testing.expectf(t, slice.equal(img.pixels, want[:]), "%v", img.pixels)
+		destroy_image(&img)
+	}
+	{ // Interlaced: the passes reach rows 0, 4, 2, 6, and the data ends in row 6.
+		colours := [?]u8{255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255}
+		f := Frame_Record {
+			width       = 2,
+			height      = 8,
+			interlaced  = true,
+			palette     = colours[:],
+			transparent = -1,
+		}
+		canvas := picture("GGGGGGGGGGGGGGGG")
+		defer delete(canvas)
+		draw(canvas[:], 2, &f, white[:7])
+		want := picture("WW GG WW GG WW GG WG GG")
+		defer delete(want)
+		testing.expectf(t, slice.equal(canvas[:], want[:]), "%v", canvas[:])
+	}
+}
+
+// A first frame that ends early leaves the rest of the canvas in the background
+// colour, inside its rectangle too: as stb.
+@(test)
+short_first_frames_show_the_background :: proc(t: ^testing.T) {
+	white: [6]u8
+	for i in 0 ..< 6 do white[i] = 3
+	frames := [1]Test_Frame{{width = 4, height = 4, indices = white[:], transparent = -1}}
+	data := write(4, 4, 0, frames[:])
+	defer delete(data)
+	data[11] = 1 // the logical screen's background index: green
+	want := picture("WWWW WWGG GGGG GGGG")
+	defer delete(want)
+	img, err := decode(data[:])
+	testing.expect_value(t, err, Error.None)
+	testing.expect(t, slice.equal(img.pixels, want[:]))
+	destroy_image(&img)
 }

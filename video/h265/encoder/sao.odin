@@ -600,15 +600,10 @@ sao_apply_plane :: proc(
 	}
 }
 
-// Apply SAO to the reconstructed picture in coding tree unit raster order.
-// The source snapshot is refreshed here from the final reconstruction: the
-// decode applies SAO to exactly what it decoded, so the encoder must filter
-// the same samples (the decision's earlier snapshot comes from the search
-// pass and can differ from the bitstream pass's replay).
+// Apply SAO to the reconstructed picture in coding tree unit raster order,
+// from enc.sao_src, the deblocked picture the caller has also copied to
+// enc.rec.
 sao_apply_frame :: proc(enc: ^Encoder) {
-	copy(enc.sao_src.y.data, enc.rec.y.data)
-	copy(enc.sao_src.u.data, enc.rec.u.data)
-	copy(enc.sao_src.v.data, enc.rec.v.data)
 	for cty in 0 ..< enc.ctu_rows {
 		for ctx in 0 ..< enc.ctu_cols {
 			idx := cty * enc.ctu_cols + ctx

@@ -233,30 +233,16 @@ dpb_find :: proc(d: ^Decoder, poc: i32) -> ^Picture {
 // dpb_mark is 8.3.2: everything the current picture's reference picture set
 // leaves out stops being a reference.
 dpb_mark :: proc(d: ^Decoder, rps: ^Ref_Pic_Set) {
-	keep := make(map[i32]bool, ref_pic_set_num_poc_total_curr(rps))
-	defer delete(keep)
-
-	long := make(map[i32]bool, len(rps.lt_curr) + len(rps.lt_foll))
-	defer delete(long)
-
-	for p in rps.st_curr_before do keep[p] = true
-	for p in rps.st_curr_after do keep[p] = true
-	for p in rps.st_foll do keep[p] = true
-
-	for p in rps.lt_curr {
-		keep[p] = true
-		long[p] = true
-	}
-
-	for p in rps.lt_foll {
-		keep[p] = true
-		long[p] = true
-	}
-
 	for i in 0 ..< len(d.dpb) {
 		poc := i32(d.dpb[i].pic.poc)
-		d.dpb[i].ref = keep[poc]
-		d.dpb[i].long_term = long[poc]
+		long := slice.contains(rps.lt_curr[:], poc) || slice.contains(rps.lt_foll[:], poc)
+		keep :=
+			long ||
+			slice.contains(rps.st_curr_before[:], poc) ||
+			slice.contains(rps.st_curr_after[:], poc) ||
+			slice.contains(rps.st_foll[:], poc)
+		d.dpb[i].ref = keep
+		d.dpb[i].long_term = long
 	}
 }
 

@@ -328,3 +328,13 @@ test_cabac_all_initial_states :: proc(t: ^testing.T) {
 		ref_encoder_destroy(&e)
 	}
 }
+
+// StatCoeff restarts with the contexts, at a slice, a tile or a wavefront row
+// with nothing to inherit.
+@(test)
+stat_coeff_restarts_with_the_contexts :: proc(t: ^testing.T) {
+	c: Cabac
+	for i in STAT_COEFF ..< CABAC_N_STATE do c.state[i] = 9
+	cabac_init_contexts(&c, 26, .I, false)
+	for i in STAT_COEFF ..< CABAC_N_STATE do testing.expect_value(t, c.state[i], u8(0))
+}

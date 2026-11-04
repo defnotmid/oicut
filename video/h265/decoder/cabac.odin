@@ -48,11 +48,16 @@ ctxResScaleSignFlag :: 175
 ctxCUChromaQPOffsetFlag :: 177
 ctxCUChromaQPOffsetIDX :: 178
 
+// The four StatCoeff counters follow the contexts in the state array: 9.3.1
+// initialises, stores and synchronises them together.
+STAT_COEFF :: CABAC_N_CONTEXTS
+CABAC_N_STATE :: CABAC_N_CONTEXTS + 4
+
 // The arithmetic decoding engine is common's, shared with H.264, which
 // defines the same engine and tables.
 Cabac :: struct {
 	cursor: common.Cabac_Cursor,
-	state:  [CABAC_N_CONTEXTS]u8,
+	state:  [CABAC_N_STATE]u8,
 }
 
 // cabac_init positions the engine at the first byte of slice_segment_data.
@@ -96,6 +101,8 @@ cabac_init_contexts :: proc(c: ^Cabac, qp: i32, slice: Slice_Type, cabac_init: b
 	for i in 0 ..< CABAC_N_CONTEXTS {
 		c.state[i] = cabac_init_state(row[i], qp)
 	}
+
+	for i in STAT_COEFF ..< CABAC_N_STATE do c.state[i] = 0
 }
 
 // A transform block's view of the engine: the cursor copied into a local for
@@ -103,7 +110,7 @@ cabac_init_contexts :: proc(c: ^Cabac, qp: i32, slice: Slice_Type, cabac_init: b
 // theirs, and the slice's contexts. decode_residual writes the cursor back.
 Cabac_Bins :: struct {
 	cursor: common.Cabac_Cursor,
-	state:  ^[CABAC_N_CONTEXTS]u8,
+	state:  ^[CABAC_N_STATE]u8,
 }
 
 // cabac_decode_bin is DecodeDecision (9.3.4.3.2) against context `ctx`.

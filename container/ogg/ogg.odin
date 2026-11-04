@@ -162,8 +162,8 @@ index :: proc(r: ^Reader, prefer: string) -> Error {
 			// A span of the current packet ends here (at a terminator, or the
 			// page's last value).
 			if open_packet < 0 {
-				if continued && run > 0 && len(r.packets) == 0 {
-					// A packet continued from before the stream's first page we keep.
+				if continued {
+					// A packet whose start was lost, wherever it falls: libogg drops it too.
 					offset += i64(run)
 					run = 0
 					continued = false

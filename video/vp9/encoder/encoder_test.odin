@@ -389,3 +389,36 @@ bool_range_subdivision :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+// 12-bit content at full amplitude needs the wide inverse transform in the
+// encoder's reconstruction too, or it drifts from what the decoder shows.
+@(test)
+high_depth_extremes_match_the_decoder :: proc(t: ^testing.T) {
+	w, h := 64, 64
+	e: Encoder
+	cfg := Encoder_Config{width = w, height = h, bit_depth = 12, subsampling = .YUV420, base_q_idx = 64, keyframe_interval = 4, block_log2 = 5}
+	if !testing.expect_value(t, init_encoder(&e, cfg), .None) do return
+	defer destroy_encoder(&e)
+	d: decoder.Decoder
+	decoder.init_decoder(&d)
+	defer decoder.destroy_decoder(&d)
+	strides := [3]int{w, w / 2, w / 2}
+	heights := [3]int{h, h / 2, h / 2}
+	input: [3][]u16
+	for p in 0 ..< 3 do input[p] = make([]u16, strides[p] * heights[p])
+	defer for v in input do delete(v)
+	for f in 0 ..< 4 {
+		for p in 0 ..< 3 do for &v, i in input[p] do v = (i / strides[p] + i % strides[p] + f) & 1 != 0 ? 4095 : 0
+		pkt, _, err := encode_frame16(&e, input, strides)
+		if !testing.expect_value(t, err, .None) do return
+		pic, shown, de := decoder.decode_packet(&d, pkt)
+		if !testing.expect_value(t, de, .None) || !testing.expect(t, shown) do return
+		rec, rs := reconstruction16(&e)
+		for p in 0 ..< 3 do for y in 0 ..< heights[p] do for x in 0 ..< strides[p] {
+			if rec[p][y * rs[p] + x] != pic.planes16[p][y * pic.strides[p] + x] {
+				testing.expectf(t, false, "frame %d plane %d at %d,%d", f, p, x, y)
+				return
+			}
+		}
+	}
+}

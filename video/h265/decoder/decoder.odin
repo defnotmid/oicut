@@ -601,6 +601,8 @@ decode_slice_data :: proc(d: ^Ctu_Decoder($Sample), nal: Nal_Unit, sh: ^Slice_He
 	picture_header := d.sh
 	d.sh = sh
 	defer d.sh = picture_header
+	// A slice with the CU chroma offsets off must not inherit the last slice's.
+	d.cu_cb_offset, d.cu_cr_offset = 0, 0
 
 	w := int(d.s.pic_width_in_ctbs)
 	total := w * int(d.s.pic_height_in_ctbs)

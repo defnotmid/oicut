@@ -57,8 +57,8 @@ Chunk :: struct {
 	payload: []u8,
 }
 
-// The RIFF chunks after the header, padded to even sizes; a truncated last
-// chunk keeps what is there.
+// The RIFF chunks after the header, padded to even sizes; a last chunk claiming
+// more than the RIFF holds keeps what is there.
 @(private)
 next_chunk :: proc(data: ^[]u8) -> (c: Chunk, ok: bool) {
 	if len(data) < 8 do return
@@ -81,12 +81,17 @@ le24 :: #force_inline proc(b: []u8) -> int {
 	return int(b[0]) | int(b[1]) << 8 | int(b[2]) << 16
 }
 
+// A file shorter than its RIFF size says was cut off, and is refused rather
+// than shown. Only the size can tell: a lossy partition reads as zeros past
+// its end, which decode to plausible blocks for a few bits each, so a short cut
+// gives wrong pixels and no error. libwebp refuses to decode it by the same
+// rule; get_features here refuses it as well, where libwebp would read the header.
 @(private)
 riff_body :: proc(data: []u8) -> (body: []u8, err: Error) {
 	if len(data) < 12 || string(data[:4]) != "RIFF" || string(data[8:12]) != "WEBP" do return nil, .Invalid
 	size := int(le32(data[4:]))
-	if size < 4 do return nil, .Invalid
-	return data[12:min(len(data), 8 + size)], .None
+	if size < 4 || size > len(data) - 8 do return nil, .Invalid
+	return data[12:8 + size], .None
 }
 
 // A still image's frame (or a frame's ANMF payload): optional ALPH, then

@@ -645,6 +645,7 @@ receive_decoded_frames :: proc(session: ^media.Session, s: ^State, receiver: med
 			stride := int(s.frame.linesize[i])
 			row := (cx + pw) * sample_bytes
 			if s.frame.data[i] == nil || stride < row || int(s.frame.height) < (i == 0 ? out.crop_y + out.height : (out.crop_y + out.height + sh - 1) / sh) {
+				free_held(&pending)
 				return .Codec_Error
 			}
 			start := (cy * stride + cx * sample_bytes)

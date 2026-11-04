@@ -120,3 +120,42 @@ info_tag :: proc(t: ^testing.T) {
 	testing.expect_value(t, tag.delay, 576 + DECODER_DELAY)
 	testing.expect_value(t, tag.padding, 1000 - DECODER_DELAY)
 }
+
+// A mixed block at MPEG-2.5's 8 kHz: its band table's three long bands are the
+// first two subbands, and the reorder stays inside the spectrum.
+@(test)
+mixed_blocks_at_8_khz :: proc(t: ^testing.T) {
+	frame := silent_frame({0xFF, 0xE3, 0x88, 0xC4})
+	defer delete(frame)
+	put :: proc(p: []u8, at: ^int, v: u32, n: int) {
+		for i := n - 1; i >= 0; i -= 1 {
+			if v >> uint(i) & 1 != 0 do p[at^ / 8] |= 0x80 >> uint(at^ % 8)
+			at^ += 1
+		}
+	}
+	d := new(Decoder)
+	defer free(d)
+	seed := u32(1)
+	for compress in ([4]u32{0, 100, 200, 399}) {
+		for i in 4 ..< len(frame) do frame[i] = 0
+		at := 4 * 8
+		put(frame[:], &at, 0, 9) // main_data_begin, private bits
+		put(frame[:], &at, 3000, 12)
+		put(frame[:], &at, 180, 9)
+		put(frame[:], &at, 170, 8)
+		put(frame[:], &at, compress, 9)
+		put(frame[:], &at, 1, 1) // window switching
+		put(frame[:], &at, 2, 2) // short
+		put(frame[:], &at, 1, 1) // mixed
+		put(frame[:], &at, 13, 5)
+		put(frame[:], &at, 7, 5)
+		put(frame[:], &at, 0, 11) // subblock gains, scale, count1 table
+		for i in 4 + 9 ..< len(frame) {
+			seed = seed * 1664525 + 1013904223
+			frame[i] = u8(seed >> 24)
+		}
+		f, e := decode_frame(d, frame[:])
+		testing.expect_value(t, e, Error.None)
+		testing.expect(t, f.complete)
+	}
+}

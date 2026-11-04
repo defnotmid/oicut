@@ -288,6 +288,7 @@ init_encoder :: proc(enc: ^Encoder, config: Config, allocator := context.allocat
 }
 
 destroy_encoder :: proc(enc: ^Encoder) {
+	context.allocator = enc.allocator
 	free_frame(&enc.source)
 	free_frame(&enc.rec)
 	for l in 0 ..< 2 {
@@ -766,6 +767,7 @@ next_substream :: proc(enc: ^Encoder, wpp_handoff: bool) {
 // ---------------------------------------------------------------------------
 
 build_tiles :: proc(enc: ^Encoder) {
+	context.allocator = enc.allocator
 	cols, rows := enc.config.tiles_cols, enc.config.tiles_rows
 	ctus := enc.ctu_cols * enc.ctu_rows
 

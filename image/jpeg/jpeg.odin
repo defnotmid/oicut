@@ -362,7 +362,8 @@ read_scans :: proc(d: ^Decoder) -> Error {
 			for d.at < len(d.data) {
 				if byte_at(d) == 0xFF {
 					m = byte_at(d)
-					break
+					for m == 0xFF && d.at < len(d.data) do m = byte_at(d)
+					if m != 0 do break
 				}
 			}
 		}

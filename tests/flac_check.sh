@@ -16,7 +16,7 @@ bad() { printf '  %-44s FAIL\n' "$1"; fail=1; }
 
 odin test audio/flac
 odin build tests/flac_compare.odin -file -o:speed -out:"$work/flac_compare"
-odin build tests/movie_alpha.odin -file -o:speed -out:"$work/movie_alpha"
+odin build tests/movie_alpha.odin -file -o:speed -define:OICUT_PATENTED=true -out:"$work/movie_alpha"
 odin build tests/alpha_fuzz.odin -file -o:speed -sanitize:address -out:"$work/alpha_fuzz"
 bash tests/flac_fixtures.sh "$fx"
 

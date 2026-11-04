@@ -40,8 +40,9 @@ conversion of lossy images to RGBA runs on it, row by row.
   - the canvas starts transparent, and `ANIM`'s background colour is reported (`Features.background`) but not painted, as libwebp does.
 - **Not read:** ICC profiles (sRGB is assumed), EXIF and XMP. Raw VP8/VP8L bitstreams without the RIFF container are not accepted.
 - **Damaged input:**
-  - a truncated lossy partition decodes as zeros, as a damaged frame would;
-  - a truncated lossless stream is refused (`.Invalid`).
+  - a file shorter than its RIFF size is refused (`.Invalid`), by `get_features` too, as libwebp refuses to decode it;
+  - inside a whole file, a lossy chunk with no room for its first partition, partition sizes or last partition is refused (`.Invalid`), and a partition that runs out after that decodes as zeros, as a damaged frame would;
+  - inside a whole file, a lossless stream that runs out is refused (`.Invalid`).
 
 ## Layout
 

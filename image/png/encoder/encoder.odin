@@ -43,7 +43,7 @@ encode :: proc(pixels: []u8, width, height: int, allocator := context.allocator)
 
 @(private)
 valid :: proc(pixels: []u8, width, height: int) -> bool {
-	return width > 0 && height > 0 && width <= int(max(u32)) && height <= int(max(u32)) && len(pixels) >= width * height * 4
+	return width > 0 && height > 0 && width <= int(max(i32)) && height <= int(max(i32)) && len(pixels) / 4 >= width * height
 }
 
 @(private)

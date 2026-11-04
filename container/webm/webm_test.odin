@@ -266,3 +266,50 @@ lc_config_with_explicit_rate :: proc(t: ^testing.T) {
 	testing.expect_value(t, bits >> 7 & 0xFFFFFF, 37800)
 	testing.expect_value(t, bits >> 3 & 15, 1)
 }
+
+// One track's bad sampling frequency loses that value, not the file; a repeated
+// CodecID or CodecPrivate frees what it replaces.
+@(test)
+a_bad_sampling_frequency_keeps_the_file :: proc(t: ^testing.T) {
+	Case :: struct {
+		rate: f64,
+		want: int,
+	}
+	zero := 0.0
+	cases := [?]Case{{48000, 48000}, {0, 0}, {-48000, 0}, {1e12, 0}, {zero / zero, 0}}
+	for c in cases {
+		doc, header, segment, tracks, track, audio, video_track, video: [dynamic]u8
+		defer {delete(doc); delete(header); delete(segment); delete(tracks); delete(track); delete(audio); delete(video_track); delete(video)}
+		element(&header, u32(ID.Doc_Type), transmute([]u8)string("matroska"))
+		element(&doc, u32(ID.EBML), header[:])
+		uint_element(&video, u32(ID.Pixel_Width), 16)
+		uint_element(&video, u32(ID.Pixel_Height), 16)
+		uint_element(&video_track, u32(ID.Track_Number), 1)
+		uint_element(&video_track, u32(ID.Track_Type), 1)
+		element(&video_track, u32(ID.Codec_ID), transmute([]u8)string("V_VP9"))
+		element(&video_track, u32(ID.Video), video[:])
+		element(&tracks, u32(ID.Track_Entry), video_track[:])
+		uint_element(&audio, u32(ID.Sampling_Frequency), transmute(u64)c.rate)
+		uint_element(&audio, u32(ID.Channels), 2)
+		uint_element(&track, u32(ID.Track_Number), 2)
+		uint_element(&track, u32(ID.Track_Type), 2)
+		element(&track, u32(ID.Codec_ID), transmute([]u8)string("A_VORBIS"))
+		element(&track, u32(ID.Codec_ID), transmute([]u8)string("A_OPUS"))
+		element(&track, u32(ID.Codec_Private), {1, 2, 3})
+		element(&track, u32(ID.Codec_Private), {4, 5})
+		element(&track, u32(ID.Audio), audio[:])
+		element(&tracks, u32(ID.Track_Entry), track[:])
+		element(&segment, u32(ID.Tracks), tracks[:])
+		element(&doc, u32(ID.Segment), segment[:])
+		data := doc[:]
+		r: Reader
+		err := open_stream(&r, bytes_stream(&data))
+		testing.expectf(t, err == .None, "rate %v: %v", c.rate, err)
+		if err != .None do continue
+		defer close(&r)
+		testing.expect_value(t, len(r.tracks), 2)
+		testing.expect_value(t, r.tracks[1].sample_rate, c.want)
+		testing.expect_value(t, r.tracks[1].codec_id, "A_OPUS")
+		testing.expect_value(t, len(r.tracks[1].codec_private), 2)
+	}
+}

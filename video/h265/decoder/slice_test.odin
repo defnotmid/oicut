@@ -135,3 +135,45 @@ test_pred_weight_table :: proc(t: ^testing.T) {
 	testing.expect_value(t, h.weights.luma_weight[1][0], i16(1))
 	testing.expect_value(t, h.weights.chroma_weight[1][0], [2]i16{1, 1})
 }
+
+// CuQpOffsetCb and CuQpOffsetCr do not cross into the next slice: one with the
+// offsets off would scale its chroma with the last slice's.
+@(test)
+test_slice_start_clears_cu_chroma_offsets :: proc(t: ^testing.T) {
+	cfg := enc.Config {
+		width       = 128,
+		height      = 64,
+		qp          = 26,
+		level_idc   = 120,
+		forced_mode = -1,
+	}
+	e: enc.Encoder
+	enc.init_encoder(&e, cfg)
+	stream := encode_test_frames(&e, 1, 128, 64)
+	enc.destroy_encoder(&e)
+	defer delete(stream)
+	nals := split_annex_b(stream[:])
+	defer {
+		for &nal in nals do destroy_nal(&nal)
+		delete(nals)
+	}
+	d: Decoder
+	init_decoder(&d)
+	defer destroy_decoder(&d)
+	out: [dynamic]^Picture
+	defer {
+		for pic in out do release_picture(&d, pic)
+		delete(out)
+	}
+	for &nal in nals do testing.expect(t, decode_nal(&d, nal, &out))
+	ctu := d.ctu.(^Ctu_Decoder(u8))
+	ctu.cu_cb_offset, ctu.cu_cr_offset = 6, -6
+	next := Slice_Header {
+		slice_type            = .I,
+		slice_segment_address = 1,
+		data_offset           = 1,
+	}
+	decode_slice_data(ctu, {rbsp = nil}, &next)
+	testing.expect_value(t, ctu.cu_cb_offset, i32(0))
+	testing.expect_value(t, ctu.cu_cr_offset, i32(0))
+}

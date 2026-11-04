@@ -637,7 +637,9 @@ audio_entry_children :: proc(t: ^Track, body: []u8, iso_v1: bool) -> (children: 
 	if version == 2 {
 		children_at = 64
 		if len(body) < 64 do return nil, 0, .Invalid_Data
-		t.sample_rate = int(transmute(f64)get_u64(body[32:]))
+		// One track's bad rate is no reason to lose the file: as if absent.
+		rate := transmute(f64)get_u64(body[32:])
+		t.sample_rate = rate > 0 && rate <= 1e7 ? int(rate) : 0
 		t.channels = int(get_u32(body[40:]))
 	}
 	if len(body) < children_at do return nil, 0, .Invalid_Data

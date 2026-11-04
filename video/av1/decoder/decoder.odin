@@ -399,14 +399,16 @@ decode_packet :: proc(d: ^Decoder, data: []u8) -> (pic: Picture, shown: bool, er
 			continue
 		}
 
+		defer if d.cur != nil {
+			release_buffer(d, d.cur)
+			d.cur = nil
+		}
 		decode_frame(d, h, data, fr.tiles) or_return
 		if h.show_frame {
 			pic = make_picture(d, d.cur, h.render_width, h.render_height, &h.film_grain)
 			shown = true
 		}
 		update_ref_slots(d, h)
-		release_buffer(d, d.cur)
-		d.cur = nil
 	}
 	return pic, shown, .None
 }

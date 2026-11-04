@@ -1513,7 +1513,7 @@ transform_plane :: proc(t: ^Tile, r, c, size, p, ptx: int, is_intra, seg_skip: b
 					}
 				}
 			} else {
-				vp9.inverse_transform(block, log2_n, tx_type, lossless, (last_pos >> log2_n) + 1)
+				vp9.inverse_transform(block, log2_n, tx_type, lossless, (last_pos >> log2_n) + 1, e.bit_depth)
 				for yy in 0 ..< n {
 					p_row := frame[(py + yy) * stride + px:]
 					b_row := block[yy * n:]

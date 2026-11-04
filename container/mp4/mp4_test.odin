@@ -805,3 +805,25 @@ av1_roundtrip :: proc(t: ^testing.T) {
 	testing.expect(t, !s1.sync)
 	testing.expect_value(t, string(s1.data), string(frame_obu[:]))
 }
+
+// A QuickTime version 2 sound description's bad rate loses that value, not the
+// file: the reader goes on to the track's other boxes.
+@(test)
+test_v2_sound_description_with_a_bad_rate :: proc(t: ^testing.T) {
+	zero := 0.0
+	rates := [?]f64{48000, 0, -48000, 1e12, zero / zero}
+	wants := [?]int{48000, 0, 0, 0, 0}
+	for rate, i in rates {
+		body: [64]u8
+		body[9] = 2 // version
+		bits := transmute(u64)rate
+		for k in 0 ..< 8 do body[32 + k] = u8(bits >> uint(56 - 8 * k))
+		body[43] = 2 // channels
+		track: Track
+		_, version, err := audio_entry_children(&track, body[:], false)
+		testing.expect_value(t, err, Error.None)
+		testing.expect_value(t, version, u16(2))
+		testing.expect_value(t, track.sample_rate, wants[i])
+		testing.expect_value(t, track.channels, 2)
+	}
+}

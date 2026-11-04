@@ -547,6 +547,7 @@ decode_adts_frame :: proc(
 	copy(d.pending_bank[:d.config.channels], d.bank[:d.config.channels])
 	staged_coupling: [16]bool
 	seed := d.noise_seed
+	history_layout, history_program := d.layout, d.program
 	drc := d.dynamic_range
 	position := h.header_bytes
 	for block in 0 ..< h.raw_block_count {
@@ -574,9 +575,10 @@ decode_adts_frame :: proc(
 			if ce := aac.validate_adts_block_crc(h, block, d.frame.crc); ce != .None do return 0, 0, ce
 		}
 		stage_coupling_banks(d, &staged_coupling)
-		if pe = render_raw_block(d, d.pending_bank[:], d.pending_coupling_bank[:], &seed, d.pending_pcm[block * n:(block + 1) * n], layout); pe != .None do return 0, 0, pe
-		drc = resolve_frame_dynamic_range(d, drc, &layout, &program)
+		if pe = render_raw_block(d, d.pending_bank[:], d.pending_coupling_bank[:], &seed, d.pending_pcm[block * n:(block + 1) * n], history_layout); pe != .None do return 0, 0, pe
+		drc = resolve_frame_dynamic_range(d, drc, &history_layout, &history_program)
 		layout, program, explicit_layout = d.frame.layout, d.frame.program, d.frame.explicit_layout
+		history_layout, history_program = layout, program
 		position += bytes
 	}
 	if !h.protected && position != h.frame_bytes do return 0, 0, .Invalid_Data

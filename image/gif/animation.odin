@@ -68,8 +68,8 @@ next_frame :: proc(a: ^Animation) -> (frame: Frame, err: Error) {
 	f := &a.frames[a.next]
 	if f.disposal == .Previous do copy(a.saved, a.canvas)
 	indices := a.indices[:f.width * f.height]
-	decode_raster(a.data, f, indices) or_return
-	draw(a.canvas, a.width, f, indices)
+	coded := decode_lzw(a.data, f.raster, indices) or_return
+	draw(a.canvas, a.width, f, indices[:coded])
 	frame = {a.canvas, a.time, f.delay}
 	a.time += f.delay
 	a.next += 1

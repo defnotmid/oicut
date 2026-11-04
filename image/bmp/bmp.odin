@@ -151,7 +151,7 @@ decode_into :: proc(data: []u8, pixels: []u8) -> Error {
 	if len(pixels) < width * height * 4 do return .Invalid
 	palette_size: int
 	if h.header_size == 12 {
-		if h.bpp < 24 do palette_size = (h.offset - 14 - 24) / 3
+		if h.bpp < 24 do palette_size = (h.offset - h.read) / 3
 	} else if h.bpp < 16 {
 		palette_size = (h.offset - h.read) >> 2
 	}

@@ -179,19 +179,20 @@ decode_into :: proc(data: []u8, pixels: []u8) -> Error {
 	indices, ierr := make([]u8, f.width * f.height, context.temp_allocator)
 	if ierr != nil do return .Out_Of_Memory
 	defer delete(indices, context.temp_allocator)
-	decode_raster(data, f, indices) or_return
+	coded := decode_lzw(data, f.raster, indices) or_return
 	// A transparent canvas; the frame draws only its opaque pixels.
 	mem.zero_slice(pixels[:p.width * p.height * 4])
-	// As stb: where the first frame does not reach, the background colour (black
-	// without a global table), opaque. stb swaps its red and blue there; this
-	// writes the colour as the table gives it.
-	if p.background > 0 && (f.width < p.width || f.height < p.height) {
+	// As stb: what the first frame does not reach, or ends before, is the
+	// background colour (black without a global table), opaque. stb swaps its
+	// red and blue there; this writes the colour as the table gives it.
+	short := coded < f.width * f.height
+	if p.background > 0 && (short || f.width < p.width || f.height < p.height) {
 		c := [4]u8{0, 0, 0, 255}
 		if p.background * 3 + 3 <= len(p.global) do c.rgb = {p.global[p.background * 3], p.global[p.background * 3 + 1], p.global[p.background * 3 + 2]}
 		canvas := slice.reinterpret([][4]u8, pixels)
 		for y in 0 ..< p.height {
 			row := canvas[y * p.width:][:p.width]
-			if y < f.y || y >= f.y + f.height {
+			if short || y < f.y || y >= f.y + f.height {
 				slice.fill(row, c)
 			} else {
 				slice.fill(row[:f.x], c)
@@ -199,7 +200,7 @@ decode_into :: proc(data: []u8, pixels: []u8) -> Error {
 			}
 		}
 	}
-	draw(pixels, p.width, f, indices)
+	draw(pixels, p.width, f, indices[:coded])
 	return .None
 }
 
@@ -208,8 +209,10 @@ destroy_image :: proc(img: ^Image, allocator := context.allocator) {
 	img^ = {}
 }
 
-// Draws a frame's indices onto an RGBA canvas `canvas_width` wide, a pixel
-// only where its colour is opaque.
+// Draws a frame's colour indices, as coded, onto an RGBA canvas `canvas_width`
+// wide, a pixel only where its colour is opaque: an interlaced frame's rows
+// come in four passes. A frame whose data ended early leaves the rest of its
+// rectangle as it was, as stb does.
 @(private)
 draw :: proc(canvas: []u8, canvas_width: int, f: ^Frame_Record, indices: []u8) #no_bounds_check {
 	// The frame's colours as RGBA, alpha 0 where nothing is drawn: the
@@ -218,32 +221,21 @@ draw :: proc(canvas: []u8, canvas_width: int, f: ^Frame_Record, indices: []u8) #
 	for i in 0 ..< len(f.palette) / 3 do colours[i] = {f.palette[i * 3], f.palette[i * 3 + 1], f.palette[i * 3 + 2], 255}
 	if f.transparent >= 0 do colours[f.transparent].a = 0
 	pixels := slice.reinterpret([][4]u8, canvas)
-	for y in 0 ..< f.height {
-		dst := pixels[(f.y + y) * canvas_width + f.x:][:f.width]
-		for v, i in indices[y * f.width:][:f.width] {
-			c := colours[v]
-			if c.a != 0 do dst[i] = c
+	// Each pass's first row and step.
+	@(static, rodata) interlaced := [4][2]int{{0, 8}, {4, 8}, {2, 4}, {1, 2}}
+	@(static, rodata) progressive := [1][2]int{{0, 1}}
+	at := 0
+	for pass in (f.interlaced ? interlaced[:] : progressive[:]) {
+		for y := pass[0]; y < f.height && at < len(indices); y += pass[1] {
+			n := min(f.width, len(indices) - at)
+			dst := pixels[(f.y + y) * canvas_width + f.x:][:n]
+			for v, i in indices[at:][:n] {
+				c := colours[v]
+				if c.a != 0 do dst[i] = c
+			}
+			at += n
 		}
 	}
-}
-
-// The frame's colour indices, in display row order: an interlaced frame's
-// rows come in four passes, decoded in that order and then put in place.
-@(private)
-decode_raster :: proc(data: []u8, f: ^Frame_Record, indices: []u8) -> Error {
-	if !f.interlaced do return decode_lzw(data, f.raster, indices[:f.width * f.height])
-	stream, err := make([]u8, f.width * f.height, context.temp_allocator)
-	if err != nil do return .Out_Of_Memory
-	defer delete(stream, context.temp_allocator)
-	decode_lzw(data, f.raster, stream) or_return
-	@(static, rodata) starts := [4]int{0, 4, 2, 1}
-	@(static, rodata) steps := [4]int{8, 8, 4, 2}
-	y := 0
-	for pass in 0 ..< 4 do for row := starts[pass]; row < f.height; row += steps[pass] {
-		copy(indices[row * f.width:][:f.width], stream[y * f.width:][:f.width])
-		y += 1
-	}
-	return .None
 }
 
 // LZW codes (variable width, LSB first, in sub-blocks) to `out`, in stream
@@ -252,10 +244,10 @@ decode_raster :: proc(data: []u8, f: ^Frame_Record, indices: []u8) -> Error {
 // is where they start and how many there are, and decoding a code copies
 // from earlier output, as LZ77 does. What runs past `out` is dropped.
 @(private)
-decode_lzw :: proc(data: []u8, raster: int, out: []u8) -> Error #no_bounds_check {
-	if raster >= len(data) do return .Invalid
+decode_lzw :: proc(data: []u8, raster: int, out: []u8) -> (coded: int, err: Error) #no_bounds_check {
+	if raster >= len(data) do return 0, .Invalid
 	min_size := int(data[raster])
-	if min_size < 1 || min_size > 11 do return .Invalid
+	if min_size < 1 || min_size > 11 do return 0, .Invalid
 	MAX :: 4096
 	start: [MAX]int
 	length: [MAX]int
@@ -272,12 +264,12 @@ decode_lzw :: proc(data: []u8, raster: int, out: []u8) -> Error #no_bounds_check
 	for {
 		for count < u32(size) {
 			if block == 0 {
-				if at >= len(data) do return .Invalid
+				if at >= len(data) do return 0, .Invalid
 				block = int(data[at])
 				at += 1
-				if block == 0 do return .None // the data ended without an end code
+				if block == 0 do return min(written, len(out)), .None // the data ended without an end code
 			}
-			if at >= len(data) do return .Invalid
+			if at >= len(data) do return 0, .Invalid
 			bits |= u32(data[at]) << count
 			count += 8
 			at += 1
@@ -291,18 +283,18 @@ decode_lzw :: proc(data: []u8, raster: int, out: []u8) -> Error #no_bounds_check
 			size, next, old, started = min_size + 1, clear + 2, -1, true
 			continue
 		case code == clear + 1:
-			return .None
+			return min(written, len(out)), .None
 		case !started:
-			return .Invalid // stb requires a clear code first
+			return 0, .Invalid // stb requires a clear code first
 		case code > next:
-			return .Invalid
+			return 0, .Invalid
 		}
 		if old >= 0 && next < MAX {
 			start[next] = old_start
 			length[next] = (old < clear ? 1 : length[old]) + 1
 			next += 1
 		} else if code == next {
-			return .Invalid
+			return 0, .Invalid
 		}
 		n := 1
 		room := len(out) - written

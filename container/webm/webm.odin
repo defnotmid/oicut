@@ -649,9 +649,12 @@ parse_track :: proc(r: ^Reader, t: ^Track, entry: Element) -> Error {
 			}
 		case .Codec_ID:
 			id := read_bytes(r, e) or_return
+			delete(t.codec_id)
 			t.codec_id = string(id)
 		case .Codec_Private:
-			t.codec_private = read_bytes(r, e) or_return
+			bytes := read_bytes(r, e) or_return
+			delete(t.codec_private)
+			t.codec_private = bytes
 		case .Default_Duration:
 			t.default_duration = i64(read_uint(r, e) or_return)
 		case .Codec_Delay:
@@ -665,7 +668,9 @@ parse_track :: proc(r: ^Reader, t: ^Track, entry: Element) -> Error {
 				c := read_element(r, a, e.end) or_return
 				#partial switch ID(c.id) {
 				case .Sampling_Frequency:
-					t.sample_rate = int(read_float(r, c) or_return)
+					// One track's bad rate is no reason to lose the file: as if absent.
+					rate := read_float(r, c) or_return
+					if rate > 0 && rate <= 1e7 do t.sample_rate = int(rate)
 				case .Channels:
 					t.channels = int(read_uint(r, c) or_return)
 				case .Bit_Depth:
@@ -960,14 +965,18 @@ parse_block :: proc(r: ^Reader, e: Element, base: i64, indices: []Index, g: Grou
 				frames[i] = size
 			}
 		case 3: // EBML: first size, then signed differences
-			first, first_len, _ := read_vint(r, data, false) or_return
-			data += i64(first_len)
-			frames[0] = i64(first)
-			for i in 1 ..< count - 1 {
-				raw, raw_len, _ := read_vint(r, data, false) or_return
-				data += i64(raw_len)
-				bias := i64(1) << uint(7 * raw_len - 1) - 1
-				frames[i] = frames[i - 1] + i64(raw) - bias
+			if count > 1 {
+				first, first_len, _ := read_vint(r, data, false) or_return
+				data += i64(first_len)
+				frames[0] = i64(first)
+				if frames[0] < 0 || frames[0] > e.end - data do return .Invalid_Data
+				for i in 1 ..< count - 1 {
+					raw, raw_len, _ := read_vint(r, data, false) or_return
+					data += i64(raw_len)
+					bias := i64(1) << uint(7 * raw_len - 1) - 1
+					frames[i] = frames[i - 1] + i64(raw) - bias
+					if frames[i] < 0 || frames[i] > e.end - data do return .Invalid_Data
+				}
 			}
 		case 2: // fixed
 		}
@@ -979,7 +988,7 @@ parse_block :: proc(r: ^Reader, e: Element, base: i64, indices: []Index, g: Grou
 	} else {
 		used: i64
 		for i in 0 ..< count - 1 {
-			if frames[i] < 0 do return .Invalid_Data
+			if frames[i] < 0 || frames[i] > remaining - used do return .Invalid_Data
 			used += frames[i]
 		}
 		frames[count - 1] = remaining - used
