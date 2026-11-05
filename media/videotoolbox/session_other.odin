@@ -37,6 +37,10 @@ encoder_encode :: proc(e: ^Encoder, y: []u8, y_stride: int, chroma: Encoder_Chro
 	return nil, false, .Unavailable
 }
 
+encoder_drain :: proc(e: ^Encoder) -> (packet: []u8, keyframe, more: bool, err: Error) {
+	return nil, false, false, .Unavailable
+}
+
 encoder_destroy :: proc(e: ^Encoder) {
 	e^ = {}
 }

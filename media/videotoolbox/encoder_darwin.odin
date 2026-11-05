@@ -1,26 +1,59 @@
 package media_videotoolbox
 
-// A VideoToolbox compression session, one picture per call: each encode
-// completes its frame before returning, so packets come out in input order.
-// The output callback only keeps VideoToolbox's sample; the packet is built
-// on the caller's thread. The encoder's address is the callback context: do
-// not move it while open.
+import "core:sync"
+import "core:time"
+
+// Pictures in flight, as the Vulkan encoder keeps them: each encode call
+// publishes the picture submitted ENCODE_DEPTH-1 calls earlier and drain
+// publishes the rest, so one picture's encoding overlaps the next one's
+// submission.
+ENCODE_DEPTH :: #config(OICUT_ENCODE_DEPTH, 3)
+
+// How long a picture may take before it is forced out (`take_oldest`): only
+// for an encoder that broke its word on how many it may hold back.
+ENCODE_PATIENCE :: time.Second
+
+// A VideoToolbox compression session. Packets come out in input order. The
+// output callback only keeps VideoToolbox's sample, in its picture's slot;
+// the packet is built on the caller's thread, once the slot is marked done.
+// The encoder's address is the callback context: do not move it while open.
 Encoder :: struct {
-	config:  Encoder_Config,
-	vt:      VTCompressionSessionRef,
-	frames:  i64,
-	sample:  CMSampleBufferRef, // the output callback's sample, retained
-	packet:  [dynamic]u8, // Annex B: parameter sets before keyframes, then the picture
-	scratch: [dynamic]u8, // the sample's length-prefixed NAL units
-	status:  i32, // the last OSStatus VideoToolbox returned, for diagnostics
-	qp_held: bool, // the frame QP limits took; otherwise quality approximates qp
+	config:   Encoder_Config,
+	vt:       VTCompressionSessionRef,
+	frames:   i64, // pictures submitted
+	taken:    i64, // pictures published; those between are in flight
+	slots:    [ENCODE_DEPTH]Encoder_Slot,
+	finished: sync.Futex, // bumped as each picture comes back: what `take_oldest` waits on
+	sample:   CMSampleBufferRef, // the picture being published, retained
+	packet:   [dynamic]u8, // Annex B: parameter sets before keyframes, then the picture
+	scratch:  [dynamic]u8, // the sample's length-prefixed NAL units
+	status:   i32, // the last OSStatus VideoToolbox returned, for diagnostics
+	qp_held:  bool, // the frame QP limits took; otherwise quality approximates qp
+}
+
+// What the output callback left for a picture; `done` publishes the rest.
+@(private)
+Encoder_Slot :: struct {
+	sample: CMSampleBufferRef, // retained; nil if it failed or was dropped
+	status: OSStatus,
+	done:   bool,
 }
 
 @(private)
 on_encoded :: proc "c" (ref_con, frame_ref_con: rawptr, status: OSStatus, info_flags: u32, sample: CMSampleBufferRef) {
 	e := (^Encoder)(ref_con)
-	e.status = status
-	if status == 0 && sample != nil do e.sample = CMSampleBufferRef(CFRetain(CFTypeRef(sample)))
+	slot := &e.slots[uintptr(frame_ref_con) % ENCODE_DEPTH]
+	slot.status = status
+	if status == 0 && sample != nil do slot.sample = CMSampleBufferRef(CFRetain(CFTypeRef(sample)))
+	sync.atomic_store(&slot.done, true)
+	sync.atomic_add(&e.finished, 1)
+	sync.futex_signal(&e.finished)
+}
+
+// A picture's presentation time: its number, which is also how it is found.
+@(private)
+picture_time :: proc "contextless" (picture: i64) -> CMTime {
+	return {value = picture, timescale = 1, flags = 1} // kCMTimeFlags_Valid
 }
 
 encoder_create :: proc(e: ^Encoder, config: Encoder_Config) -> Error {
@@ -49,6 +82,9 @@ encoder_create :: proc(e: ^Encoder, config: Encoder_Config) -> Error {
 	set_property(e, kVTCompressionPropertyKey_ProfileLevel, rawptr(profile)) or_return
 	set_property(e, kVTCompressionPropertyKey_AllowFrameReordering, rawptr(kCFBooleanFalse)) or_return
 	set_number(e, kVTCompressionPropertyKey_MaxKeyFrameInterval, config.keyframe_interval) or_return
+	// A picture must come back before the depth asks for it (`take_oldest`);
+	// an encoder without the property keeps its own count.
+	_ = set_number(e, kVTCompressionPropertyKey_MaxFrameDelayCount, ENCODE_DEPTH - 1)
 	set_property(e, kVTCompressionPropertyKey_ColorPrimaries, rawptr(kCVImageBufferColorPrimaries_ITU_R_709_2)) or_return
 	set_property(e, kVTCompressionPropertyKey_TransferFunction, rawptr(kCVImageBufferTransferFunction_ITU_R_709_2)) or_return
 	set_property(e, kVTCompressionPropertyKey_YCbCrMatrix, rawptr(kCVImageBufferYCbCrMatrix_ITU_R_709_2)) or_return
@@ -80,8 +116,9 @@ set_number :: proc(e: ^Encoder, key: CFStringRef, value: int) -> Error {
 	return set_property(e, key, rawptr(number))
 }
 
-// Encodes one picture and returns its Annex B packet, borrowed until the
-// next call.
+// Submits one picture and, once ENCODE_DEPTH are in flight, returns the
+// oldest's Annex B packet, borrowed until the next call; nil before that.
+// The picture is copied before this returns.
 encoder_encode :: proc(e: ^Encoder, y: []u8, y_stride: int, chroma: Encoder_Chroma) -> (packet: []u8, keyframe: bool, err: Error) {
 	if e.vt == nil do return nil, false, .Invalid_Argument
 	image: CVPixelBufferRef
@@ -94,14 +131,45 @@ encoder_encode :: proc(e: ^Encoder, y: []u8, y_stride: int, chroma: Encoder_Chro
 	values := [1]rawptr{rawptr(force ? kCFBooleanTrue : kCFBooleanFalse)}
 	options := CFDictionaryCreate(nil, &keys[0], &values[0], 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks)
 	defer CFRelease(CFTypeRef(options))
-	pts := CMTime{value = e.frames, timescale = 1, flags = 1} // kCMTimeFlags_Valid
-	e.frames += 1
 	info: u32
-	if status := VTCompressionSessionEncodeFrame(e.vt, image, pts, kCMTimeInvalid, options, nil, &info); status != 0 {
+	if status := VTCompressionSessionEncodeFrame(e.vt, image, picture_time(e.frames), kCMTimeInvalid, options, rawptr(uintptr(e.frames)), &info); status != 0 {
 		e.status = status
 		return nil, false, .Encoder_Error
 	}
-	VTCompressionSessionCompleteFrames(e.vt, kCMTimeInvalid)
+	e.frames += 1
+	if e.frames - e.taken < ENCODE_DEPTH do return nil, false, .None
+	return take_oldest(e)
+}
+
+// The packets still in flight, oldest first, one a call, each borrowed until
+// the next; `more` is false when none are left.
+encoder_drain :: proc(e: ^Encoder) -> (packet: []u8, keyframe, more: bool, err: Error) {
+	if e.vt == nil || e.taken >= e.frames do return nil, false, false, .None
+	packet, keyframe, err = take_oldest(e)
+	return packet, keyframe, err == .None, err
+}
+
+// Waits for the callback: VTCompressionSessionCompleteFrames, even only up to
+// this picture's time, waits for the pictures behind it too, and with it each
+// call would see the encoder through one picture at a time again (hello_world
+// on the M4: 4.88 s, the same as completing every frame, against 4.06 s).
+// MaxFrameDelayCount holds VideoToolbox to the depth, so the picture is coming;
+// completing is what's left if it doesn't.
+@(private)
+take_oldest :: proc(e: ^Encoder) -> (packet: []u8, keyframe: bool, err: Error) {
+	slot := &e.slots[e.taken % ENCODE_DEPTH]
+	for !sync.atomic_load(&slot.done) {
+		seen := sync.atomic_load(&e.finished)
+		if sync.atomic_load(&slot.done) do break
+		if !sync.futex_wait_with_timeout(&e.finished, u32(seen), ENCODE_PATIENCE) {
+			VTCompressionSessionCompleteFrames(e.vt, picture_time(e.taken))
+			break
+		}
+	}
+	e.taken += 1
+	e.status = slot.status
+	e.sample = slot.sample
+	slot^ = {}
 	if e.sample == nil do return nil, false, .Encoder_Error
 	defer {CFRelease(CFTypeRef(e.sample)); e.sample = nil}
 	return build_packet(e)
@@ -174,7 +242,9 @@ encoder_destroy :: proc(e: ^Encoder) {
 		VTCompressionSessionInvalidate(e.vt)
 		CFRelease(CFTypeRef(e.vt))
 	}
-	if e.sample != nil do CFRelease(CFTypeRef(e.sample))
+	for slot in e.slots {
+		if slot.sample != nil do CFRelease(CFTypeRef(slot.sample))
+	}
 	delete(e.packet)
 	delete(e.scratch)
 	e^ = {}

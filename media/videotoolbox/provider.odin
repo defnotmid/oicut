@@ -157,9 +157,20 @@ open_encoder :: proc(session: ^media.Session, s: ^State, config: media.Config) -
 	session.state = s
 	session.video_impl = encode_videotoolbox
 	session.close_impl = close_videotoolbox
-	session.drain_impl = proc(session: ^media.Session, receiver: media.Receiver) -> media.Error {return .None} // one packet per frame
+	session.drain_impl = drain_encoder
 	if err != .None do return report(session, err, s.encoder.status)
 	return .None
+}
+
+@(private)
+drain_encoder :: proc(session: ^media.Session, receiver: media.Receiver) -> media.Error {
+	s := (^State)(session.state)
+	for {
+		packet, keyframe, more, err := encoder_drain(&s.encoder)
+		if err != .None do return report(session, err, s.encoder.status)
+		if !more do return .None
+		if receiver.packet != nil do receiver.packet({data = packet, framing = .Annex_B, keyframe = keyframe}, receiver.user)
+	}
 }
 
 @(private)
@@ -173,6 +184,6 @@ encode_videotoolbox :: proc(session: ^media.Session, frame: media.Video_Frame, r
 	}
 	packet, keyframe, err := encoder_encode(&s.encoder, frame.planes[0].data, frame.planes[0].stride, chroma)
 	if err != .None do return report(session, err, s.encoder.status)
-	if receiver.packet != nil do receiver.packet({data = packet, framing = .Annex_B, keyframe = keyframe}, receiver.user)
+	if packet != nil && receiver.packet != nil do receiver.packet({data = packet, framing = .Annex_B, keyframe = keyframe}, receiver.user)
 	return .None
 }

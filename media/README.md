@@ -144,10 +144,10 @@ frame buffer. The common provider uses zero checkpoint capacity. Codec-specific
 `encode_frame_lanes` cannot share a seekable contiguous output history or retain
 checkpoints; use the contiguous encoder API when those features are required.
 Vulkan packet callbacks instead borrow one contiguous packet from retained
-encoder storage; capacity grows only when needed. Vulkan keeps three pictures
-in flight: the first two calls publish nothing, each later call publishes the
-picture two calls back, and drain publishes the rest. Both publication modes retain
-the common callback-only lifetime.
+encoder storage; capacity grows only when needed. Vulkan and VideoToolbox keep
+three pictures in flight: the first two calls publish nothing, each later call
+publishes the picture two calls back, and drain publishes the rest. Both
+publication modes retain the common callback-only lifetime.
 
 For GPU image processing, set `output_storage=.Device` before opening. During
 the video callback, `vulkan.surface(frame)` returns the typed `vulkan.Surface`:

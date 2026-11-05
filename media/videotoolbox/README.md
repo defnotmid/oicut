@@ -25,19 +25,25 @@ if vt.init_h265_decoder(&d) == .None { // require_hardware = true: .Unavailable 
 
 ## Encoding
 
-`encoder_create` / `encoder_encode` / `encoder_destroy` run a compression
-session (on the hardware encoder when `require_hardware` is set, else
+`encoder_create` / `encoder_encode` / `encoder_drain` / `encoder_destroy` run
+a compression session (on the hardware encoder when `require_hardware` is set, else
 whichever VideoToolbox picks): H.264 High or HEVC Main, 8-bit
 4:2:0, BT.709 limited range, I and P pictures (no reordering), a keyframe
 every `keyframe_interval` frames. `qp` is held constant by setting the
 minimum and maximum frame QP to it (macOS 13 and later; the M4 honours
 it), else it maps to the quality setting. Input is I420 or NV12, copied by
-rows into a pixel buffer from the session's pool. Each call completes its
-frame; the packet is Annex B, with the format description's parameter
-sets before each keyframe.
+rows into a pixel buffer from the session's pool before the call returns.
+Three pictures stay in flight, as on Vulkan (`OICUT_ENCODE_DEPTH`): the first
+two calls return nothing, each later call returns the picture two calls back,
+in input order, and `encoder_drain` returns the rest. VideoToolbox's output
+callback only keeps the sample and wakes the caller, whose thread builds the
+packet: Annex B, with the format description's parameter sets before each
+keyframe. Completing frames on each call instead would hold the encoder to one
+at a time: on the M4 that costs a render of a simple 1080p video about 20% and
+one decoding a clip about 40%, with the same pixels.
 
-On the M4 at 1080p through `video.Writer`: H.264 about 164 fps and HEVC
-about 154 fps from I420 or NV12 (`tests/videotoolbox_encode_check.odin`),
+On the M4 at 1080p through `video.Writer`: H.264 about 230 fps and HEVC
+about 217 fps from I420 or NV12 (`tests/videotoolbox_encode_check.odin`),
 both decoded by oicut's native decoders and FFmpeg; QP 18, 30 and 40 give
 49.7, 43.6 and 37.8 dB (H.264, 720p).
 

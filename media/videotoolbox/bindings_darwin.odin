@@ -142,6 +142,7 @@ foreign video_toolbox {
 	kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: CFStringRef
 	kVTCompressionPropertyKey_AllowFrameReordering: CFStringRef
 	kVTCompressionPropertyKey_MaxKeyFrameInterval: CFStringRef
+	kVTCompressionPropertyKey_MaxFrameDelayCount: CFStringRef
 	kVTCompressionPropertyKey_ProfileLevel: CFStringRef
 	kVTCompressionPropertyKey_MinAllowedFrameQP: CFStringRef
 	kVTCompressionPropertyKey_MaxAllowedFrameQP: CFStringRef
