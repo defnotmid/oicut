@@ -102,13 +102,18 @@ sad_int_luma :: proc(enc: ^Encoder, ref: ^Frame, x, y, w, h, mx, my: int) -> u32
 	return sum
 }
 
-// Exhaustive integer search followed by half- and quarter-pel refinement.
-// The integer stage uses integer SAD (no interpolation) and stops early on an
-// exact match; only the 8 half-pel and 8 quarter-pel neighbours around the
-// best integer vector are interpolated. This mirrors kvazaar's
-// `search_mv_full` + `search_frac`. Ultrafast replaces the exhaustive stage
-// with a coarse-to-fine diamond from the prediction and the origin, and
-// stops at half-pel.
+// The clamp at the end of motion_estimate, in whole samples.
+MAX_MV_SAMPLES :: 511
+
+// Integer search followed by half- and quarter-pel refinement. The integer
+// stage uses integer SAD (no interpolation) and stops early on an exact match:
+// it walks downhill from the prediction or the origin, and a block still poorly
+// matched tries a grid around the prediction and walks on from the best of it.
+// The only limit on a walk is the largest vector the encoder writes; every step
+// must lower the SAD, so a walk ends by itself. Only the 8 half-pel and 8
+// quarter-pel neighbours around the best integer vector are interpolated.
+// Ultrafast replaces the walks with a coarse-to-fine diamond inside the motion
+// range, and stops at half-pel.
 motion_estimate :: proc(
 	enc: ^Encoder,
 	ref: ^Frame,
@@ -159,13 +164,11 @@ motion_estimate :: proc(
 				bx, by = 0, 0
 			}
 		}
-		min_x, max_x := ix - range, ix + range
-		min_y, max_y := iy - range, iy + range
 		for cost > 0 {
 			cx, cy := bx, by
 			for offset in ([4][2]i32{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}) {
 				nx, ny := cx + offset[0], cy + offset[1]
-				if nx < min_x || nx > max_x || ny < min_y || ny > max_y do continue
+				if abs(nx) > MAX_MV_SAMPLES || abs(ny) > MAX_MV_SAMPLES do continue
 				s := sad_int_luma(enc, ref, x, y, w, h, int(nx), int(ny))
 				if s < cost {
 					cost = s
@@ -189,7 +192,7 @@ motion_estimate :: proc(
 				cx, cy := bx, by
 				for offset in ([8][2]i32{{-1, 0}, {1, 0}, {0, -1}, {0, 1}, {-1, -1}, {1, -1}, {-1, 1}, {1, 1}}) {
 					nx, ny := cx + offset[0], cy + offset[1]
-					if nx < min_x || nx > max_x || ny < min_y || ny > max_y do continue
+					if abs(nx) > MAX_MV_SAMPLES || abs(ny) > MAX_MV_SAMPLES do continue
 					s := sad_int_luma(enc, ref, x, y, w, h, int(nx), int(ny))
 					if s < cost {
 						cost = s
