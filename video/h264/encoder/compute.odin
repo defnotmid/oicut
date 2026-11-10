@@ -47,11 +47,10 @@ Compute_State :: struct {
 	slot:                               int,
 	generation:                         u64,
 	active, canceled, pending:          bool,
-	next_wave:                          u32,
+	filtered:                           bool, // the filter waves are submitted
 	submissions:                        u64,
 	gpu_ms:                             f64, // sum of actual device timestamps, excludes host scheduling
 }
-COMPUTE_WAVES_PER_BATCH :: 8
 COMPUTE_TABLE_SIZE :: 364 * size_of(i32)
 
 init_compute :: proc(
@@ -222,8 +221,9 @@ compute_barrier :: proc(
 	c.device.api.CmdPipelineBarrier(c.command, src, dst, {}, 1, &barrier, 0, nil, 0, nil)
 }
 
-// Submit a bounded batch against stable addresses. Host and shader visibility is
-// established explicitly even though the mapped allocation is host-coherent.
+// Submit the strength pass, or every filter wave, against stable addresses. Host
+// and shader visibility is established explicitly even though the mapped
+// allocation is host-coherent.
 submit_compute :: proc(c: ^Compute_State, strengths: bool) -> Error {
 	d := c.device
 	if d.api.ResetCommandBuffer(c.command, {}) != .SUCCESS do return compute_error(c, .Driver_Error, "compute command reset failed")
@@ -258,10 +258,10 @@ submit_compute :: proc(c: ^Compute_State, strengths: bool) -> Error {
 			1,
 		)
 	} else {
+		// Every wave in this one submission, each behind a barrier on the last:
+		// one fence a frame instead of one per handful of waves.
 		d.api.CmdBindPipeline(c.command, .COMPUTE, c.filter_pipeline)
-		total := c.params.macroblock_columns + 2 * (c.params.macroblock_rows - 1)
-		last := min(c.next_wave + COMPUTE_WAVES_PER_BATCH, total)
-		for wave in c.next_wave ..< last {
+		for wave in 0 ..< c.params.macroblock_columns + 2 * (c.params.macroblock_rows - 1) {
 			compute_barrier(
 				c,
 				{.COMPUTE_SHADER},
@@ -280,7 +280,7 @@ submit_compute :: proc(c: ^Compute_State, strengths: bool) -> Error {
 			)
 			d.api.CmdDispatch(c.command, c.params.macroblock_rows, 1, 1)
 		}
-		c.next_wave = last
+		c.filtered = true
 	}
 	compute_barrier(c, {.COMPUTE_SHADER}, {.HOST}, {.SHADER_WRITE}, {.HOST_READ, .HOST_WRITE})
 	d.api.CmdWriteTimestamp(c.command, {.BOTTOM_OF_PIPE}, c.queries, 1)
@@ -315,7 +315,7 @@ begin_compute_deblock :: proc(
 	c.params.y, c.params.cb, c.params.cr =
 		c.pictures[slot].planes[0], c.pictures[slot].planes[1], c.pictures[slot].planes[2]
 	c.params.chroma0, c.params.chroma1 = chroma_offsets[0], chroma_offsets[1]
-	c.active, c.canceled, c.next_wave = true, false, 0
+	c.active, c.canceled, c.filtered = true, false, false
 	c.pictures[slot].generation = 0
 	if err := submit_compute(c, true); err != .None {c.active = false; return err}
 	return .None
@@ -325,8 +325,9 @@ cancel_compute :: proc(c: ^Compute_State) {
 	if c.active do c.canceled = true
 }
 
-// Nonblocking poll and at most one bounded batch submission. A canceled slot
-// remains unavailable to both CPU and GPU writers until its fence has retired.
+// Nonblocking poll, submitting the filter waves once the strengths retire. A
+// canceled slot remains unavailable to both CPU and GPU writers until its fence
+// has retired.
 advance_compute :: proc(c: ^Compute_State) -> (ready: bool, err: Error) {
 	if !c.active do return true, .None
 	d := c.device
@@ -342,13 +343,22 @@ advance_compute :: proc(c: ^Compute_State) -> (ready: bool, err: Error) {
 			f64((ticks[1] - ticks[0]) & mask) * f64(d.properties.limits.timestampPeriod) / 1e6
 	}
 	if c.canceled {c.active = false; return true, .None}
-	if c.next_wave == c.params.macroblock_columns + 2 * (c.params.macroblock_rows - 1) {
+	if c.filtered {
 		c.pictures[c.slot].generation = c.generation
 		c.active = false
 		return true, .None
 	}
 	submit_compute(c, false) or_return
 	return false, .None
+}
+
+// Blocks until the submission in flight retires, for a caller with nothing else
+// to do between advances; with none in flight it returns at once.
+wait_compute :: proc(c: ^Compute_State) -> Error {
+	if !c.pending do return .None
+	d := c.device
+	if d.api.WaitForFences(d.handle, 1, &c.fence, true, ~u64(0)) != .SUCCESS do return compute_error(c, .Driver_Error, "compute fence wait failed")
+	return .None
 }
 
 // Attach before the first frame. Replace the cold CPU allocations with borrowed

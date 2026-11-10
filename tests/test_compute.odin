@@ -129,7 +129,7 @@ test_stage :: proc(
 			mem.copy(&other.v[y * other.uv_stride], &gpu.v[y * gpu.uv_stride], width / 2)
 		}
 		assert(avc_enc.begin_compute_deblock(&c, macroblocks, 1, 999, {0, 0}) == .None)
-		if submit_filter do for c.next_wave == 0 {_, wave_err := avc_enc.advance_compute(&c); assert(wave_err == .None); thread.yield()}
+		if submit_filter do for !c.filtered {_, wave_err := avc_enc.advance_compute(&c); assert(wave_err == .None); thread.yield()}
 		start := time.tick_now()
 		avc_enc.cancel_compute(&c)
 		ack_ms = max(ack_ms, time.duration_milliseconds(time.tick_since(start)))

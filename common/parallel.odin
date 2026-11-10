@@ -15,7 +15,8 @@ import "core:thread"
 // it locally: no scheduler callback, allocation or atomic per element.
 // Elements are independent and write only their preallocated owned state.
 // The descriptor and backing storage stay alive until `run` returns; it is
-// not called reentrantly on the same pool. Zero count performs no callback.
+// not called reentrantly on the same pool. A pool has one caller at a time:
+// calls from different threads must not overlap. Zero count performs no callback.
 // ---------------------------------------------------------------------------
 
 Range_Proc :: #type proc(data: rawptr, first, end: int)

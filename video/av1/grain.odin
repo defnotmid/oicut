@@ -1,8 +1,8 @@
 package av1
 
-// Normative Film Grain Synthesis (section 7.18.3) shared by the AV1 decoder and encoder.
-// Operates stripe-by-stripe (32 luma rows per stripe) in place on the output planes
-// without heap allocations.
+// Normative Film Grain Synthesis (section 7.18.3), as the AV1 decoder applies it.
+// Operates stripe-by-stripe (32 luma rows per stripe) in place on the output planes;
+// the only heap memory is the caller's stripe buffer.
 
 // Section 7.18.3.2: Random number process (16-bit LFSR).
 grain_random_number :: #force_inline proc "contextless" (reg: ^u16, bits: uint) -> int {
@@ -194,6 +194,7 @@ grain_scale_lut :: #force_inline proc "contextless" (
 }
 
 // Section 7.18.3: Applies film grain synthesis in place on `planes` (`OutY`, `OutU`, `OutV`).
+// `stripes` is the caller's scratch, kept between frames.
 apply_film_grain :: proc(
 	planes: [3][]$T,
 	strides: [3]int,
@@ -202,6 +203,7 @@ apply_film_grain :: proc(
 	mono_chrome: bool,
 	sub_x, sub_y: uint,
 	matrix_coefficients: u8,
+	stripes: ^[dynamic]i16,
 	bit_depth := 8,
 ) #no_bounds_check {
 	if !fg.apply_grain do return
@@ -231,10 +233,12 @@ apply_film_grain :: proc(
 	}
 	scaling_shift := uint(fg.grain_scaling_minus_8) + 8
 
-	// Allocate two 34-row stripe buffers (current and previous stripe bottom) to support arbitrary frame widths.
+	// Per plane, the current 34-row stripe and the previous stripe's bottom two
+	// rows, in the caller's buffer. Every sample is written before it is read, so
+	// it is reused from frame to frame as it stands. Out of memory: no grain.
 	stripe_stride := w + 68
-	stripe_buf := make([]i16, 3 * 34 * stripe_stride + 3 * 2 * stripe_stride)
-	defer delete(stripe_buf)
+	if resize(stripes, 3 * 34 * stripe_stride + 3 * 2 * stripe_stride) != nil do return
+	stripe_buf := stripes[:]
 
 	cur_stripe: [3][]i16
 	prev_bottom: [3][]i16

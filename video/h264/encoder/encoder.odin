@@ -6,7 +6,6 @@ import common "../../../common"
 import "core:math"
 import "core:mem"
 import "core:slice"
-import "core:thread"
 
 // ---------------------------------------------------------------------------
 // Encoder: Constrained Baseline, CAVLC, I and P pictures
@@ -443,7 +442,14 @@ complete_encode_frame_work :: proc(state: ^Encoder_State, pool: ^common.Work_Poo
 		ready, err := advance_encode_frame(state, state.macroblock_count, pool)
 		if err != .None {cancel_encode_frame(state); return err}
 		if ready do break
-		if state.compute != nil && state.frame.phase == .Filtering do thread.yield()
+		// Deblocking on the GPU: sleep until its submission retires.
+		if state.compute != nil && state.frame.phase == .Filtering {
+			if err = wait_compute(state.compute); err != .None {
+				state.error_detail = state.compute.error_detail
+				cancel_encode_frame(state)
+				return err
+			}
+		}
 	}
 	return .None
 }

@@ -295,6 +295,8 @@ test_film_grain_synthesis :: proc(t: ^testing.T) {
 
 	planes := [3][]u16{y, u, v}
 	strides := [3]int{w, w >> 1, w >> 1}
+	stripes: [dynamic]i16
+	defer delete(stripes)
 	apply_film_grain(
 		planes,
 		strides,
@@ -305,6 +307,7 @@ test_film_grain_synthesis :: proc(t: ^testing.T) {
 		1,
 		1,
 		0,
+		&stripes,
 		8,
 	)
 

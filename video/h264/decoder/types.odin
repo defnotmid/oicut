@@ -6,12 +6,11 @@ import "core:mem"
 
 // Motion of a reference picture kept for temporal/spatial direct prediction
 Reference_Motion :: struct {
-	motion_vectors:                 [2][16][2]i16,
-	reference_indices:              [2][4]i8,
-	reference_picture_ids:          [2][4]i32,
-	reference_picture_order_counts: [2][4]i32,
-	prediction_directions:          [4]h264.Prediction_Direction,
-	is_intra:                       bool,
+	motion_vectors:        [2][16][2]i16,
+	reference_indices:     [2][4]i8,
+	reference_picture_ids: [2][4]i32,
+	prediction_directions: [4]h264.Prediction_Direction,
+	is_intra:              bool,
 }
 
 // A decoded picture in the DPB

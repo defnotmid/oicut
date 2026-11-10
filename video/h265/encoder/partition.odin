@@ -80,18 +80,17 @@ part_search_limit :: #force_inline proc(enc: ^Encoder, w, h: int) -> u64 {
 // CU grid helpers
 // ---------------------------------------------------------------------------
 
-// fill_pu_info writes one prediction unit's record into the cells it covers.
-// The decoder's set_mv does the same for its motion field, so later PUs of the
-// same CU read it back during candidate derivation.
+// fill_pu_info writes one prediction unit's record into the 4x4 cells it
+// covers (a prediction unit starts and ends on that grid). The decoder's set_mv
+// does the same for its motion field, so later PUs of the same CU read it back
+// during candidate derivation.
 fill_pu_info :: proc(enc: ^Encoder, x, y, width, height: int, info_in: Cu_Info) {
 	info := info_in
 	if !info.pred[0] do info.ref_idx[0] = -1
 	if !info.pred[1] do info.ref_idx[1] = -1
-	for cy in y ..< y + height {
-		for cx in x ..< x + width {
-			if cx & 3 != 0 || cy & 3 != 0 do continue
-			cu_at(enc.cu, cx, cy)^ = info
-		}
+	base := (y >> 2) * enc.cu.cols + (x >> 2)
+	for j in 0 ..< height >> 2 {
+		for &c in enc.cu.cells[base + j * enc.cu.cols:][:width >> 2] do c = info
 	}
 }
 

@@ -511,12 +511,6 @@ save_col_motion :: proc(state: ^Decoder_State, macroblock_count: int) {
 		m.reference_indices = mb.reference_indices
 		m.prediction_directions = mb.prediction_directions
 		m.is_intra = mb.is_intra
-		for l in 0 ..< 2 do for k in 0 ..< 4 {
-			m.reference_picture_order_counts[l][k] = 0
-			if mb.reference_indices[l][k] >= 0 && int(mb.reference_indices[l][k]) < state.ref_count[l] {
-				if ref := state.ref_list[l][mb.reference_indices[l][k]]; ref != nil do m.reference_picture_order_counts[l][k] = ref.poc
-			}
-		}
 	}
 }
 

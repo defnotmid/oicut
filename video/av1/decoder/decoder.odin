@@ -94,6 +94,7 @@ Decoder :: struct {
 	upscaled_curr_buf: Frame_Buffer,
 	upscaled_cdef_buf: Frame_Buffer,
 	grain_buf:         Frame_Buffer,
+	grain_stripes:     [dynamic]i16, // apply_film_grain's scratch
 	free_buffers:      [dynamic]^Frame_Buffer,
 	all_buffers:       [dynamic]^Frame_Buffer,
 
@@ -153,6 +154,7 @@ destroy_decoder :: proc(d: ^Decoder) {
 	destroy_frame_buffer(&d.upscaled_curr_buf)
 	destroy_frame_buffer(&d.upscaled_cdef_buf)
 	destroy_frame_buffer(&d.grain_buf)
+	delete(d.grain_stripes)
 	for fb in d.all_buffers {
 		destroy_frame_buffer(fb)
 		free(fb)
@@ -317,6 +319,7 @@ make_picture :: proc(
 				out.mono_chrome,
 				uint(out.subsampling_x), uint(out.subsampling_y),
 				c.matrix_coefficients,
+				&d.grain_stripes,
 				int(out.bit_depth),
 			)
 		} else {
@@ -332,6 +335,7 @@ make_picture :: proc(
 				out.mono_chrome,
 				uint(out.subsampling_x), uint(out.subsampling_y),
 				c.matrix_coefficients,
+				&d.grain_stripes,
 				int(out.bit_depth),
 			)
 		}
@@ -683,33 +687,32 @@ decode_frame :: proc(d: ^Decoder, h: ^av1.Frame_Header, data: []u8, tiles: []av1
 		end := int(tile.offset) + int(tile.size)
 		if end > len(data) do return .Invalid_Data
 		decode_tile(d, h, 0, data[tile.offset:end], &d.cdfs) or_return
-	} else if h.disable_cdf_update {
-		for tile_num in 0 ..< num_tiles {
-			tile := tiles[tile_num]
-			end := int(tile.offset) + int(tile.size)
-			if end > len(data) do return .Invalid_Data
-			decode_tile(d, h, tile_num, data[tile.offset:end], &d.cdfs) or_return
-		}
 	} else {
-		if len(d.tile_cdfs) < num_tiles {
-			resize(&d.tile_cdfs, num_tiles)
-		}
+		// Each tile adapts its own copy of the frame's CDFs, except when updates
+		// are disabled: the tiles then only read them, and share the frame's.
+		shared := h.disable_cdf_update
 		ctx_tile := (!h.disable_frame_end_update_cdf && d.pool == nil) ? int(h.tile_info.context_update_tile_id) : -1
-		for t in 0 ..< num_tiles {
-			if t != ctx_tile {
-				d.tile_cdfs[t] = d.cdfs
+		if !shared {
+			if len(d.tile_cdfs) < num_tiles {
+				resize(&d.tile_cdfs, num_tiles)
+			}
+			for t in 0 ..< num_tiles {
+				if t != ctx_tile {
+					d.tile_cdfs[t] = d.cdfs
+				}
 			}
 		}
 
 		if d.pool != nil && num_tiles > 1 {
 			Batch :: struct {
-				d:     ^Decoder,
-				h:     ^av1.Frame_Header,
-				data:  []u8,
-				tiles: []av1.Tile,
-				err:   Error,
+				d:      ^Decoder,
+				h:      ^av1.Frame_Header,
+				data:   []u8,
+				tiles:  []av1.Tile,
+				shared: bool,
+				err:    Error,
 			}
-			b := Batch{d = d, h = h, data = data, tiles = tiles}
+			b := Batch{d = d, h = h, data = data, tiles = tiles, shared = shared}
 			d.pool.run(d.pool, num_tiles, proc(ctx: rawptr, first, end: int) {
 				b := (^Batch)(ctx)
 				for tile_num in first ..< end {
@@ -719,7 +722,8 @@ decode_frame :: proc(d: ^Decoder, h: ^av1.Frame_Header, data: []u8, tiles: []av1
 						sync.atomic_store(&b.err, Error.Invalid_Data)
 						return
 					}
-					t_err := decode_tile(b.d, b.h, tile_num, b.data[tile.offset:t_end], &b.d.tile_cdfs[tile_num])
+					cdfs := b.shared ? &b.d.cdfs : &b.d.tile_cdfs[tile_num]
+					t_err := decode_tile(b.d, b.h, tile_num, b.data[tile.offset:t_end], cdfs)
 					if t_err != .None {
 						sync.atomic_store(&b.err, t_err)
 					}
@@ -734,7 +738,7 @@ decode_frame :: proc(d: ^Decoder, h: ^av1.Frame_Header, data: []u8, tiles: []av1
 				tile := tiles[tile_num]
 				end := int(tile.offset) + int(tile.size)
 				if end > len(data) do return .Invalid_Data
-				cdfs_ptr := tile_num == ctx_tile ? &d.cdfs : &d.tile_cdfs[tile_num]
+				cdfs_ptr := shared || tile_num == ctx_tile ? &d.cdfs : &d.tile_cdfs[tile_num]
 				decode_tile(d, h, tile_num, data[tile.offset:end], cdfs_ptr) or_return
 			}
 		}

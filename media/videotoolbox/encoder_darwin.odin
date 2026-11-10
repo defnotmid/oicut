@@ -29,6 +29,7 @@ Encoder :: struct {
 	scratch:  [dynamic]u8, // the sample's length-prefixed NAL units
 	status:   i32, // the last OSStatus VideoToolbox returned, for diagnostics
 	qp_held:  bool, // the frame QP limits took; otherwise quality approximates qp
+	failed:   bool, // a picture did not come back: every later call fails
 }
 
 // What the output callback left for a picture; `done` publishes the rest.
@@ -121,6 +122,7 @@ set_number :: proc(e: ^Encoder, key: CFStringRef, value: int) -> Error {
 // The picture is copied before this returns.
 encoder_encode :: proc(e: ^Encoder, y: []u8, y_stride: int, chroma: Encoder_Chroma) -> (packet: []u8, keyframe: bool, err: Error) {
 	if e.vt == nil do return nil, false, .Invalid_Argument
+	if e.failed do return nil, false, .Encoder_Error
 	image: CVPixelBufferRef
 	if CVPixelBufferPoolCreatePixelBuffer(nil, VTCompressionSessionGetPixelBufferPool(e.vt), &image) != 0 do return nil, false, .Encoder_Error
 	defer CVBufferRelease(image)
@@ -145,6 +147,7 @@ encoder_encode :: proc(e: ^Encoder, y: []u8, y_stride: int, chroma: Encoder_Chro
 // the next; `more` is false when none are left.
 encoder_drain :: proc(e: ^Encoder) -> (packet: []u8, keyframe, more: bool, err: Error) {
 	if e.vt == nil || e.taken >= e.frames do return nil, false, false, .None
+	if e.failed do return nil, false, false, .Encoder_Error
 	packet, keyframe, err = take_oldest(e)
 	return packet, keyframe, err == .None, err
 }
@@ -162,7 +165,14 @@ take_oldest :: proc(e: ^Encoder) -> (packet: []u8, keyframe: bool, err: Error) {
 		seen := sync.atomic_load(&e.finished)
 		if sync.atomic_load(&slot.done) do break
 		if !sync.futex_wait_with_timeout(&e.finished, u32(seen), ENCODE_PATIENCE) {
-			VTCompressionSessionCompleteFrames(e.vt, picture_time(e.taken))
+			// The pictures up to this one's time are emitted before it returns
+			// (VTCompressionSession.h). If it fails, the picture could still come
+			// back later, into the slot a later picture takes, so the encoder stops.
+			if status := VTCompressionSessionCompleteFrames(e.vt, picture_time(e.taken)); status != 0 || !sync.atomic_load(&slot.done) {
+				e.status = status
+				e.failed = true
+				return nil, false, .Encoder_Error
+			}
 			break
 		}
 	}

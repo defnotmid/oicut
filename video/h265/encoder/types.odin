@@ -86,7 +86,6 @@ Cu_Info :: struct {
 	idc:         u8, // inter_pred_idc for B non-merge (0 L0, 1 L1, 2 BI)
 	mvp_flag:    [2]u8, // mvp_lX_flag chosen per list
 	qp:          i32,
-	cost:        f64,
 }
 
 Cu_Grid :: struct {
