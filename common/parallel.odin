@@ -17,6 +17,13 @@ import "core:thread"
 // The descriptor and backing storage stay alive until `run` returns; it is
 // not called reentrantly on the same pool. A pool has one caller at a time:
 // calls from different threads must not overlap. Zero count performs no callback.
+//
+// One task is not a map over independent items: VP9's loop filter
+// (vp9.loop_filter_frame) ignores its ranges, and each callback claims
+// superblock rows and spins until the row above is far enough ahead. It needs
+// no more of a pool than the above, and finishes even when the ranges run one
+// after another, but with concurrent ranges it relies on threads the system
+// preempts.
 // ---------------------------------------------------------------------------
 
 Range_Proc :: #type proc(data: rawptr, first, end: int)

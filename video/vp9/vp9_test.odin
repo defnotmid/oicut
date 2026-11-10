@@ -1,5 +1,7 @@
 package vp9
 
+import common "../../common"
+import "core:slice"
 import "core:testing"
 
 @(test)
@@ -55,26 +57,52 @@ adaptation_without_counts_keeps_probabilities :: proc(t: ^testing.T) {
 	testing.expect(t, p == before)
 }
 
-// Loop filter waves cover every superblock once, each after its left and
-// upper-right neighbours.
+// The loop filter on a pool gives the frame raster order gives: on worker
+// threads, and on a pool that runs its ranges one at a time from the last.
 @(test)
-filter_waves_cover_each_superblock_once :: proc(t: ^testing.T) {
-	for rows in 1 ..= 6 do for cols in 1 ..= 9 {
-		wave_of: [6][9]int
-		seen: [6][9]int
-		for wave in 0 ..< 2 * (rows - 1) + cols {
-			first, count := wave_range(wave, rows, cols)
-			for r in first ..< first + count {
-				c := wave - 2 * r
-				testing.expect(t, c >= 0 && c < cols)
-				seen[r][c] += 1
-				wave_of[r][c] = wave
-			}
+loop_filter_frame_matches_raster_order :: proc(t: ^testing.T) {
+	reversed :: proc(_: ^common.Work_Pool, count: int, task: common.Range_Proc, data: rawptr) {
+		for i := count - 1; i >= 0; i -= 1 do task(data, i, i + 1)
+	}
+	check :: proc(t: ^testing.T, $T: typeid, bit_depth, sb_rows, sb_cols: int, threads: ^common.Work_Pool) {
+		mi_rows, mi_cols := sb_rows * 8, sb_cols * 8
+		cells := make([]Filter_Cell, mi_rows * mi_cols)
+		defer delete(cells)
+		seed: u32 = 12345
+		next :: proc(seed: ^u32) -> int {
+			seed^ = seed^ * 1664525 + 1013904223
+			return int(seed^ >> 16)
 		}
-		for r in 0 ..< rows do for c in 0 ..< cols {
-			testing.expect_value(t, seen[r][c], 1)
-			if c > 0 do testing.expect(t, wave_of[r][c - 1] < wave_of[r][c])
-			if r > 0 && c + 1 < cols do testing.expect(t, wave_of[r - 1][c + 1] < wave_of[r][c])
+		for &c in cells do c = {level = u8(1 + next(&seed) % 63), mi_size = BLOCK_8X8, tx_size = {TX_4X4, TX_4X4}}
+		source: [3][]T
+		strides := [3]int{mi_cols * 8, mi_cols * 4, mi_cols * 4}
+		for &p, i in source {
+			p = make([]T, strides[i] * (i == 0 ? mi_rows * 8 : mi_rows * 4))
+			for &s in p do s = T((128 + next(&seed) % 9) << uint(bit_depth - 8))
+		}
+		defer for p in source do delete(p)
+		reverse_pool := common.Work_Pool{run = reversed}
+		pools := [3]^common.Work_Pool{nil, threads, &reverse_pool}
+		results: [3][3][]T
+		defer for r in results do for p in r do delete(p)
+		for pool, k in pools {
+			for p, i in source do results[k][i] = slice.clone(p)
+			f := Loop_Filter_Frame(T){planes = results[k], strides = strides, cells = cells, mi_rows = mi_rows, mi_cols = mi_cols, ss_x = 1, ss_y = 1, bit_depth = bit_depth, limits = filter_limits(0)}
+			loop_filter_frame(&f, sb_rows, sb_cols, pool)
+		}
+		for i in 0 ..< 3 {
+			testing.expect(t, !slice.equal(results[0][i], source[i]), "the filter changed nothing")
+			testing.expect(t, slice.equal(results[1][i], results[0][i]), "worker threads differ from raster order")
+			testing.expect(t, slice.equal(results[2][i], results[0][i]), "reversed ranges differ from raster order")
+		}
+	}
+	pool: common.Static_Pool
+	common.init_static_pool(&pool, 5)
+	defer common.destroy_static_pool(&pool)
+	for size in ([?][2]int{{5, 7}, {6, 1}, {2, 2}, {1, 4}, {9, 3}}) {
+		for _ in 0 ..< 20 {
+			check(t, u8, 8, size[0], size[1], &pool.work_pool)
+			check(t, u16, 10, size[0], size[1], &pool.work_pool)
 		}
 	}
 }

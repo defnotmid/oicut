@@ -52,11 +52,11 @@ are implemented to the specification but had no libvpx fixture.
 
 ## Parallelism and performance
 
-Tile columns of a tile row decode in parallel. The loop filter runs in
-anti-diagonal waves of superblocks: superblock (r, c) needs (r, c - 1) and
-(r - 1, c + 1), so all superblocks with equal `2r + c` are independent and
-each wave is one ordinary `Work_Pool` run. Motion compensation (8-tap
-filters in native-width lanes) and the loop filter (sixteen edge lines as
+Tile columns of a tile row decode in parallel. The loop filter runs as a
+superblock wavefront in one `Work_Pool` dispatch: superblock (r, c) needs
+(r, c - 1) and (r - 1, c + 1), so workers claim superblock rows in order and
+follow the row above by two columns. Motion compensation (8-tap filters in
+native-width lanes) and the loop filter (sixteen edge lines as
 `#simd` lanes, transposed for vertical edges) are vectorized.
 
 The decoder keeps what each later reader needs in its own record or grid,

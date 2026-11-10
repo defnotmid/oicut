@@ -261,12 +261,25 @@ alpha_scale :: proc(a: Alpha_Plane, bit_depth: int) -> Alpha_Scale {
 	return {a, u32(math.round(255 * 65536 / f64(int(1) << uint(bit_depth) - 1)))}
 }
 
-// Writes alpha (and premultiplies) one converted row.
+// Writes alpha (and premultiplies) one converted row, eight pixels per step
+// with the tail's arithmetic.
 @(private)
 alpha_row :: #force_inline proc(a: ^Alpha_Scale, row: int, out: [][4]u8, width: int, $T: typeid, column := 0) #no_bounds_check {
 	if len(a.plane.data) == 0 do return
+	U :: #simd[8]u32
+	div :: #force_inline proc(x: U) -> U {return simd.shr(x + 128 + simd.shr(x + 128, U(8)), U(8))} // div255
 	src := ([^]T)(raw_data(a.plane.data[row * a.plane.stride + column * size_of(T):]))
-	for x in 0 ..< width {
+	x := 0
+	for ; x + 8 <= width; x += 8 {
+		alpha := simd.shr(U(intrinsics.unaligned_load((^#simd[8]T)(src[x:]))) * U(a.mul) + (1 << 15), U(16))
+		px := intrinsics.unaligned_load((^U)(&out[x]))
+		if a.plane.premultiply {
+			r, g, b := px & 0xFF, simd.shr(px, U(8)) & 0xFF, simd.shr(px, U(16)) & 0xFF
+			px = div(r * alpha) | simd.shl(div(g * alpha), U(8)) | simd.shl(div(b * alpha), U(16))
+		}
+		intrinsics.unaligned_store((^U)(&out[x]), px & 0x00FF_FFFF | simd.shl(alpha, U(24)))
+	}
+	for ; x < width; x += 1 {
 		alpha := (u32(src[x]) * a.mul + 1 << 15) >> 16
 		px := out[x]
 		if a.plane.premultiply {

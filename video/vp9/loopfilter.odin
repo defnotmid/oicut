@@ -86,8 +86,8 @@ Loop_Filter_Frame :: struct($T: typeid) {
 
 // Filters one 64x64 superblock: each plane's vertical, then horizontal
 // edges. Raster order is normative because filters overlap; superblock
-// (r, c) needs (r, c - 1) and (r - 1, c + 1) done, so all superblocks with
-// the same 2r + c (one "wave") are independent of each other.
+// (r, c) needs (r, c - 1) and (r - 1, c + 1) done, the order
+// loop_filter_frame keeps on a pool.
 loop_filter_superblock :: proc(f: ^Loop_Filter_Frame($T), sb_row, sb_col: int) {
 	row, col := sb_row * 8, sb_col * 8
 	filter_superblock(f, false, 0, row, col)
@@ -96,11 +96,56 @@ loop_filter_superblock :: proc(f: ^Loop_Filter_Frame($T), sb_row, sb_col: int) {
 	filter_superblock(f, true, 1, row, col)
 }
 
-// Superblocks of wave w: rows r with column w - 2r inside the frame.
-wave_range :: proc(wave, sb_rows, sb_cols: int) -> (first_row, rows: int) {
-	first_row = max(0, (wave - sb_cols + 2) / 2)
-	last_row := min(sb_rows - 1, wave / 2)
-	return first_row, max(0, last_row - first_row + 1)
+@(private)
+MAX_SB_ROWS :: 1024 // a frame is at most 65536 samples high (16-bit frame_height_minus_1)
+
+@(private)
+Filter_Wavefront :: struct($T: typeid) {
+	f:                ^Loop_Filter_Frame(T),
+	sb_rows, sb_cols: int,
+	next_row:         int, // atomic: the next unclaimed superblock row
+	done_col:         []i32, // atomic, per row: the last column filtered, -1 before the first
+}
+
+// Filters every superblock of the frame. Without a pool that is raster order
+// on the caller. On a pool it is one run: each range's callback claims
+// superblock rows in order and filters (r, c) once row r - 1 has finished
+// column min(c + 1, sb_cols - 1), spinning until it has. A claimed row always
+// has a running owner and row 0 waits for nothing, so the run finishes on any
+// pool, also one that runs its ranges one after another. This is the one
+// Work_Pool task whose ranges are not independent items (see common/parallel.odin):
+// the count only says how many rows can be in progress at once, which is
+// (sb_cols + 1) / 2 since each row trails the one above by two columns.
+loop_filter_frame :: proc(f: ^Loop_Filter_Frame($T), sb_rows, sb_cols: int, pool: ^common.Work_Pool) {
+	if pool == nil || pool.run == nil || sb_rows <= 1 {
+		for r in 0 ..< sb_rows do for c in 0 ..< sb_cols do loop_filter_superblock(f, r, c)
+		return
+	}
+	assert(sb_rows <= MAX_SB_ROWS)
+	done_col: [MAX_SB_ROWS]i32 = ---
+	for &d in done_col[:sb_rows] do d = -1
+	job := Filter_Wavefront(T) {
+		f        = f,
+		sb_rows  = sb_rows,
+		sb_cols  = sb_cols,
+		done_col = done_col[:sb_rows],
+	}
+	run :: proc(data: rawptr, _, _: int) {
+		w := (^Filter_Wavefront(T))(data)
+		for {
+			r := intrinsics.atomic_add_explicit(&w.next_row, 1, .Relaxed)
+			if r >= w.sb_rows do return
+			for c in 0 ..< w.sb_cols {
+				if r > 0 {
+					need := i32(min(c + 1, w.sb_cols - 1))
+					for intrinsics.atomic_load_explicit(&w.done_col[r - 1], .Acquire) < need do intrinsics.cpu_relax()
+				}
+				loop_filter_superblock(w.f, r, c)
+				intrinsics.atomic_store_explicit(&w.done_col[r], i32(c), .Release)
+			}
+		}
+	}
+	pool.run(pool, min(sb_rows, (sb_cols + 1) / 2), run, &job)
 }
 
 @(private)

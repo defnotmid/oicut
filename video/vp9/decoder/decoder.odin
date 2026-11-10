@@ -314,14 +314,6 @@ apply_loop_filter :: proc(d: ^Decoder) {
 }
 
 @(private)
-Filter_Wave :: struct($T: typeid) {
-	f:         ^vp9.Loop_Filter_Frame(T),
-	first_row: int,
-	wave:      int,
-}
-
-// Waves of independent superblocks run on the pool in order.
-@(private)
 filter_frame :: proc(d: ^Decoder, $T: typeid) {
 	h := &d.h
 	f := vp9.Loop_Filter_Frame(T) {
@@ -337,22 +329,7 @@ filter_frame :: proc(d: ^Decoder, $T: typeid) {
 		f.planes[i] = plane(d.cur, i, T)
 		f.strides[i] = d.cur.strides[i]
 	}
-	if d.pool == nil {
-		for r in 0 ..< h.sb64_rows do for c in 0 ..< h.sb64_cols do vp9.loop_filter_superblock(&f, r, c)
-		return
-	}
-	run :: proc(data: rawptr, first, end: int) {
-		w := (^Filter_Wave(T))(data)
-		for i in first ..< end {
-			r := w.first_row + i
-			vp9.loop_filter_superblock(w.f, r, w.wave - 2 * r)
-		}
-	}
-	for wave in 0 ..< 2 * (h.sb64_rows - 1) + h.sb64_cols {
-		first_row, rows := vp9.wave_range(wave, h.sb64_rows, h.sb64_cols)
-		job := Filter_Wave(T){&f, first_row, wave}
-		d.pool.run(d.pool, rows, run, &job)
-	}
+	vp9.loop_filter_frame(&f, h.sb64_rows, h.sb64_cols, d.pool)
 }
 
 // ---- Tiles --------------------------------------------------------------------------

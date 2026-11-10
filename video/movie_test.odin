@@ -4,6 +4,7 @@ import mp4 "../container/mp4"
 import media "../media"
 import native "../media/native"
 import "core:math"
+import "core:slice"
 import "core:testing"
 
 @(private = "file")
@@ -49,6 +50,44 @@ test_bt709_limited_range_code_values :: proc(t: ^testing.T) {
 	bytes := transmute([8]u8)words
 	yuv_to_rgba({bytes[0:4], bytes[4:6], bytes[6:8]}, {4, 2, 2}, 2, 1, 16, 1, 1, &deep, rgba[:], 8)
 	testing.expect_value(t, rgba, [8]u8{0, 0, 0, 255, 255, 255, 255, 255})
+}
+
+// alpha_row's eight-pixel steps and its tail give each pixel the per-pixel
+// arithmetic, and leave the pixels past the width alone.
+@(test)
+test_alpha_row_matches_pixel_formula :: proc(t: ^testing.T) {
+	check :: proc(t: ^testing.T, $T: typeid, depth: int, premultiply: bool) {
+		W :: 33
+		top := u32(1) << uint(depth) - 1
+		samples: [W]T
+		colour: [W][4]u8
+		seed := u32(0x9E3779B9)
+		for x in 0 ..< W {
+			seed = seed * 1664525 + 1013904223
+			samples[x] = T((seed >> 8) & top)
+			colour[x] = {u8(seed >> 3), u8(seed >> 11), u8(seed >> 19), 7}
+		}
+		samples[0], samples[W - 1] = 0, T(top)
+		a := alpha_scale({slice.to_bytes(samples[:]), W * size_of(T), premultiply}, depth)
+		for width in 1 ..= W {
+			out := colour
+			alpha_row(&a, 0, out[:width], width, T)
+			for x in 0 ..< W {
+				want := colour[x]
+				if x < width {
+					alpha := (u32(samples[x]) * a.mul + 1 << 15) >> 16
+					if premultiply do for c in 0 ..< 3 do want[c] = u8(div255(u32(want[c]) * alpha))
+					want[3] = u8(alpha)
+				}
+				testing.expect_value(t, out[x], want)
+			}
+		}
+	}
+	check(t, u8, 8, false)
+	check(t, u8, 8, true)
+	check(t, u16, 10, true)
+	check(t, u16, 12, false)
+	check(t, u16, 16, true)
 }
 
 @(test)

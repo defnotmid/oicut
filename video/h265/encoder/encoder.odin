@@ -213,8 +213,16 @@ init_encoder :: proc(enc: ^Encoder, config: Config, allocator := context.allocat
 		allocator,
 		layout_format(enc.config.chroma_format),
 	)
+	// Allocate only the reference slots and SAO snapshot this configuration reads:
+	// hierarchical GOPs stage one reference per list from hier_dpb, low-delay B keeps
+	// [t-1] in L0 and [t-1, t-2] in L1, I-slice intra-only keeps none, and I/P keeps
+	// config.refs in L0.
+	ref_counts := [2]int {
+		enc.config.hierarchical || enc.config.b_frames ? 1 : (enc.config.intra_only_i_slices ? 0 : enc.config.refs),
+		enc.config.hierarchical ? 1 : (enc.config.b_frames ? 2 : 0),
+	}
 	for l in 0 ..< 2 {
-		for r in 0 ..< MAX_ENC_REFS {
+		for r in 0 ..< ref_counts[l] {
 			enc.refs[l][r] = alloc_frame(
 				enc.coded_width,
 				enc.coded_height,
@@ -225,18 +233,20 @@ init_encoder :: proc(enc: ^Encoder, config: Config, allocator := context.allocat
 			fill_frame(&enc.refs[l][r], neutral)
 		}
 	}
-	enc.sao_src = alloc_frame(
-		enc.coded_width,
-		enc.coded_height,
-		1,
-		allocator,
-		layout_format(enc.config.chroma_format),
-	)
+	if enc.config.sao {
+		enc.sao_src = alloc_frame(
+			enc.coded_width,
+			enc.coded_height,
+			1,
+			allocator,
+			layout_format(enc.config.chroma_format),
+		)
+		fill_frame(&enc.sao_src, neutral)
+	}
 	fill_frame(&enc.source, neutral)
 	fill_frame(&enc.rec, neutral)
-	fill_frame(&enc.sao_src, neutral)
 
-	if config.hierarchical {
+	if enc.config.hierarchical {
 		for i in 0 ..< MAX_HIER_FRAMES {
 			enc.hier_queue[i] = alloc_frame(
 				enc.coded_width,
@@ -1552,7 +1562,7 @@ encode_frame :: proc(
 		slice_type :=
 			enc.frame_index == 0 || idr || enc.config.intra_only_i_slices ? Slice_Type.I : Slice_Type.P
 		encode_picture(enc, poc, slice_type, out)
-		promote_rec(enc, poc)
+		if !enc.config.intra_only_i_slices do promote_rec(enc, poc)
 		enc.frame_index += 1
 		return
 	}
