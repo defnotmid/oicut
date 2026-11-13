@@ -252,7 +252,7 @@ flush_staging :: proc(w: ^Writer) -> Error {
 
 @(private)
 append_payload :: proc(w: ^Writer, data: []u8) -> Error {
-	if _, err := append(&w.staging, ..data); err != nil do return .Out_Of_Memory
+	if _, err := non_zero_append(&w.staging, ..data); err != nil do return .Out_Of_Memory
 	if len(w.staging) >= STAGING_FLUSH do return flush_staging(w)
 	return .None
 }
