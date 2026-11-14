@@ -1,68 +1,35 @@
 package vp9_encoder
 
 import vp9 ".."
-import "base:intrinsics"
+import "../../../common"
 
-// The inverse of section 9.2's range subdivision. Bytes are emitted with
-// carry propagation; the marker bit guarantees a preceding byte for carry.
+// VP9's boolean coder: common.Bool_Encoder framed with section 9.2's leading
+// zero marker bit and superframe-index padding at the end.
 @(private)
-Bool_Writer :: struct {
-	data: [dynamic]u8,
-	low, range: u32,
-	count: int,
-	failed: bool, // an append failed; the data is incomplete
-}
+Bool_Writer :: common.Bool_Encoder
 
 @(private)
 start_bool :: proc(b: ^Bool_Writer) {
-	clear(&b.data)
-	b.low, b.range, b.count, b.failed = 0, 255, -24, false
-	put_bool(b, 0, 128)
-}
-
-@(private)
-put_bool_byte :: #force_no_inline proc(b: ^Bool_Writer, shift: int) #no_bounds_check {
-	offset := shift - b.count
-	if (b.low << uint(offset - 1)) & 0x80000000 != 0 {
-		at := len(b.data) - 1
-		for at >= 0 && b.data[at] == 255 {b.data[at] = 0; at -= 1}
-		assert(at >= 0 || b.failed)
-		if at >= 0 do b.data[at] += 1
-	}
-	if _, err := append(&b.data, u8(b.low >> uint(24 - offset))); err != nil do b.failed = true
-	b.low <<= uint(offset)
-	rem := b.count
-	b.low &= 0xFFFFFF
-	b.count -= 8
-	b.low <<= uint(rem)
+	common.bool_encode_start(b)
+	common.bool_encode(b, 0, 128)
 }
 
 @(private)
 put_bool :: #force_inline proc(b: ^Bool_Writer, bit: int, prob: u8) {
-	split := 1 + ((b.range - 1) * u32(prob) >> 8)
-	b.low += bit != 0 ? split : 0
-	b.range = bit != 0 ? b.range - split : split
-	shift := int(intrinsics.count_leading_zeros(b.range) - 24)
-	b.range <<= uint(shift)
-	b.count += shift
-	if b.count >= 0 {
-		put_bool_byte(b, shift)
-		return
-	}
-	b.low <<= uint(shift)
+	common.bool_encode(b, bit, prob)
 }
 
 @(private)
 put_literal :: proc(b: ^Bool_Writer, value, bits: int) {
-	for i := bits - 1; i >= 0; i -= 1 do put_bool(b, value >> uint(i) & 1, 128)
+	common.bool_encode_literal(b, value, bits)
 }
 
 @(private)
 finish_bool :: proc(b: ^Bool_Writer) {
-	for _ in 0 ..< 32 do put_bool(b, 0, 128)
+	common.bool_encode_finish(b)
 	// A frame whose last byte looks like a superframe index needs padding.
 	if len(b.data) > 0 && b.data[len(b.data) - 1] & 0xE0 == 0xC0 {
-		if _, err := append(&b.data, 0); err != nil do b.failed = true
+		if _, err := non_zero_append(&b.data, 0); err != nil do b.failed = true
 	}
 }
 

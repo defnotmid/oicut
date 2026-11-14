@@ -243,6 +243,43 @@ encode_vp8l :: proc(e: ^Lossless_Encoder, rgba: []u8, stride, width, height: int
 	return e.failed || w.failed ? .Out_Of_Memory : .None
 }
 
+// Appends a headerless VP8L image (an ALPH chunk's payload after its 1-byte
+// header) with `plane` in the green channel. Up to 16 values pack multiple
+// pixels per word under Colour_Indexing; more code directly as green literals
+// and LZ77 copies.
+@(private)
+encode_vp8l_alpha :: proc(e: ^Lossless_Encoder, plane: []u8, width, height: int, allow_palette: bool) -> Error {
+	total := width * height
+	argb := sized(e, &e.argb, total)
+	if e.failed do return .Out_Of_Memory
+	#no_bounds_check for v, i in plane do argb[i] = 0xff000000 | u32(v) << 8
+	w := &e.w
+	w.value, w.count = 0, 0
+	palette: [256]u32
+	colours := allow_palette ? find_palette(argb, &palette) : 0
+	if colours > 0 && colours <= 16 {
+		bits: uint = colours > 4 ? 1 : colours > 2 ? 2 : 3
+		packed_width := subsample(width, bits)
+		coded := sized(e, &e.coded, packed_width * height)
+		if e.failed do return .Out_Of_Memory
+		put_bits(w, 1, 1)
+		put_bits(w, u32(Transform_Kind.Colour_Indexing), 2)
+		put_bits(w, u32(colours - 1), 8)
+		deltas: [16]u32
+		deltas[0] = palette[0]
+		for i in 1 ..< colours do deltas[i] = sub_pixels(palette[i], palette[i - 1])
+		encode_image(e, deltas[:colours], colours, false)
+		pack_indices(coded, argb, width, height, palette[:colours], bits)
+		put_bits(w, 0, 1)
+		encode_image(e, coded, packed_width, true)
+	} else {
+		put_bits(w, 0, 1)
+		encode_image(e, argb, width, true)
+	}
+	flush_bits(w)
+	return e.failed || w.failed ? .Out_Of_Memory : .None
+}
+
 // The image's colours in ascending order when there are at most 256, else 0.
 @(private)
 find_palette :: proc(argb: []u32, palette: ^[256]u32) -> int {

@@ -8,8 +8,8 @@ WebP (RFC 9649) from memory to RGBA8 with straight alpha, and back. Decoding:
 - animation (ANIM/ANMF), composited frame by frame;
 - ICC, EXIF and XMP chunks, returned as stored.
 
-Encoding is lossless: stills and animations whose pixels decode to the bytes
-given. There is no lossy encoder yet.
+Encoding is both lossless (`VP8L`) and lossy (`VP8` with lossless `ALPH`), for
+stills and animations.
 
 ```odin
 import webp "../webp"
@@ -31,19 +31,23 @@ yuv, alpha, e := webp.decode_yuva(data)
 
 meta, _ := webp.get_metadata(data)       // meta.icc, meta.exif, meta.xmp: slices of data
 
-file, err := webp.encode(pixels, width, height)  // lossless; delete when done
+file, err := webp.encode(pixels, width, height)            // lossless; delete when done
+file, err  = webp.encode_lossy(pixels, width, height, 75)  // lossy (quality 0..=100)
 err = webp.write_file("frame.webp", pixels, width, height)
+err = webp.write_lossy_file("photo.webp", pixels, width, height, 75)
 
 w: webp.Animation_Writer
 webp.init_animation_writer(&w, width, height) or_return
 defer webp.destroy_animation_writer(&w)
-for f in frames do webp.write_frame(&w, f.pixels, f.duration) or_return  // the whole canvas each time
+for f in frames do webp.write_frame(&w, f.pixels, f.duration) or_return       // lossless frame (whole canvas)
+for f in frames do webp.write_lossy_frame(&w, f.pixels, f.duration, 75) or_return // or lossy frame
 file := webp.finish_animation(&w) or_return
 ```
 
-`decode`, `init_animation`, `encode` and `init_animation_writer` take an
-optional `^common.Work_Pool`. The conversion of lossy images to RGBA runs on
-it, row by row, and so does the encoder's choice of predictors.
+`decode`, `init_animation`, `encode`, `encode_lossy` and
+`init_animation_writer` take an optional `^common.Work_Pool`. Lossy RGBA
+conversion (both ways), segment susceptibility analysis, and the lossless
+encoder's choice of predictors run on it, row by row, deterministically.
 
 ## Scope
 
@@ -62,15 +66,23 @@ it, row by row, and so does the encoder's choice of predictors.
 
 ## Encoding
 
-`encode` writes a lossless file (a `VP8L` chunk); an `Animation_Writer` takes
-the whole canvas for each frame and stores the rectangle that changed since
-the frame before, overwriting it. Pixels come back exactly, also the colour
-of fully transparent ones.
+`encode` writes a lossless file (`VP8L`), and `encode_lossy` writes a lossy
+file (`VP8`, or `VP8X` + `ALPH` + `VP8` when any pixel is not opaque). An
+`Animation_Writer` takes the whole canvas for each frame (`write_frame` or
+`write_lossy_frame`, freely mixed) and stores the rectangle that changed since
+the frame before, overwriting it.
 
+Lossless (`VP8L`, sizes up to 16384×16384; every pixel comes back exactly,
+including the colour of fully transparent ones):
 - **Up to 256 colours:** colour indexing, the indices packed 1, 2, 4 or 8 to a pixel.
 - **Otherwise:** green is subtracted from red and blue, and each 16×16 block takes the predictor whose residuals have the lowest entropy (all 14 are tried).
 - **Coding:** literals, colour-cache hits and copies from the pixel before, the pixel above, or the last place the same three pixels began. One set of prefix codes covers the image, with the colour cache size (none, or 1 to 11 bits) that codes it smallest.
 - **Not used:** the cross-colour transform, prefix codes per block, and longer match searches. libwebp's default effort uses them and is about 5% smaller on its test corpus, at several times the time.
+
+Lossy (`VP8` + `ALPH`, sizes up to 16383×16383, `quality` 0 to 100):
+- **Colour & transparency:** RGBA is converted to BT.601 studio-range 4:2:0 (averaging only visible pixels at transparent edges); mixed 8×8 blocks smooth transparent luma to the visible mean and fully transparent runs are flattened. Non-opaque images carry a lossless `ALPH` chunk (trying all four spatial filters, headerless `VP8L` vs raw), so alpha comes back exactly.
+- **Segmentation & RD:** macroblocks are clustered into up to 4 susceptibility segments (`k`-means on spatial DCT activity) with per-segment quantizers and loop-filter strengths. Each macroblock is loaded into flat 16-byte `4×4` SIMD blocks (`#simd[16]u8`) and runs Lagrangian rate-distortion mode selection over Intra-16×16 (4 modes), Intra-4×4 (all 10 modes per sub-block) and 8×8 chroma (4 modes, with DC quantization error diffusion), predicting, transforming, quantizing and reconstructing in vector registers while sharing the decoder's bordered workspace and tables.
+- **Entropy coding:** `common.Bool_Encoder` writes a single-pass flat token buffer after updating `COEFF_PROBS` wherever `COEFF_UPDATE_PROBS` saves bits, plus `skip_prob` when zero-coefficient skipping pays off. If partition 0 approaches VP8's 19-bit size limit on very large frames, Intra-4×4 header budget is tightened and the pass re-runs automatically.
 
 ## Layout
 
@@ -97,15 +109,18 @@ The gate checks:
 - **Animations** (lossless, lossy, mixed, opaque, and one that blends semi-transparent frames over a frame disposed to transparent): every canvas identical to `anim_dump`'s. `anim_dump` writes fully transparent pixels as transparent black, so ours are compared the same way.
 - **Fuzzing:** 3,000 rounds of mutated and truncated files through every entry point, under AddressSanitizer with leak checking.
 
-`bash tests/webp_encode_check.sh` covers the encoder, with the same fixtures:
-- **All 131 corpus files** re-encoded: `dwebp` decodes each to the same RGBA as it does the original. The 11158×2156 image encodes to the same bytes on 8 threads.
-- **Five animations** re-encoded through `Animation_Writer`: every canvas identical in `anim_dump`.
-- **Size:** over the corpus 48.2 MB, against 45.7 MB from `cwebp -lossless` and 47.8 MB from `cwebp -lossless -z 0`.
+`bash tests/webp_encode_check.sh` covers both encoders, with the same fixtures:
+- **All 131 corpus files** re-encoded losslessly (`dwebp` decodes each to the original's exact RGBA) and lossily at `-q 75` (`dwebp` RGBA and YUVA planes match `webp.decode` / `webp.decode_yuva` identically, with exact alpha). On both paths the 11158×2156 image encodes to the exact same bytes on 8 threads as on 1.
+- **Five animations** re-encoded both losslessly and lossily through `Animation_Writer`: every lossless canvas is identical to the original in `anim_dump`, and every lossy canvas matches `anim_dump` with exact alpha.
+- **Size & quality over the 131-file corpus:**
+  - lossless: 48.2 MB, against 45.7 MB from `cwebp -lossless` and 47.8 MB from `cwebp -lossless -z 0`;
+  - lossy (`-q 75`): 11.1 MB at 34.99 dB visible-pixel RGB PSNR, against 10.7 MB at 35.25 dB from `cwebp -q 75`.
 
-`odin test image/webp` round-trips pictures of every kind the encoder treats
-differently (1 to 256 colours and more, noise, gradients, alpha) at sizes from
-1×1, and an animation whose frames change everywhere, in one rectangle, in one
-pixel and not at all.
+`odin test image/webp` round-trips lossless and lossy pictures of every kind
+the encoders treat differently (1 to 256 colours and more, noise, gradients,
+alpha, quality curves) at sizes from 1×1, plus pure and mixed lossless/lossy
+animations whose frames change everywhere, in one rectangle, in one pixel and
+not at all.
 
 Speed against libwebp 1.6.0 (`WebPDecodeRGBA`, `-O3`, its SSE2/SSE4.1/AVX2 code)
 on one core, per image and summed over the corpus, is in

@@ -4,12 +4,16 @@ import "../../common"
 import "base:intrinsics"
 import "core:os"
 
-// Writing WebP: lossless stills and animations from RGBA8 pixels with
-// straight alpha, rows top to bottom. Every pixel decodes to the bytes
-// given, also the colour of fully transparent ones.
+// Writing WebP: lossless and lossy stills and animations from RGBA8 pixels
+// with straight alpha, rows top to bottom. Lossless decodes to the exact bytes
+// given, also the colour of fully transparent pixels; lossy codes YUV 4:2:0 in
+// VP8 (quality 0 to 100) plus a lossless ALPH plane when any pixel is not
+// opaque.
 //
-//	data, err := webp.encode(pixels, width, height) // the file's bytes; delete when done
+//	data, err := webp.encode(pixels, width, height) // lossless; delete when done
+//	data, err  = webp.encode_lossy(pixels, width, height, 75)
 //	err = webp.write_file("frame.webp", pixels, width, height)
+//	err = webp.write_lossy_file("photo.webp", pixels, width, height, 75)
 //
 //	w: webp.Animation_Writer
 //	webp.init_animation_writer(&w, width, height) or_return
@@ -17,8 +21,9 @@ import "core:os"
 //	for frame in frames do webp.write_frame(&w, frame.pixels, frame.duration) or_return
 //	data := webp.finish_animation(&w) or_return
 //
-// `pixels` holds at least width * height * 4 bytes and sizes are 1 to 16384;
-// anything else is .Invalid. With a pool, the predictors are chosen on it.
+// `pixels` holds at least width * height * 4 bytes; lossless sizes are 1 to
+// 16384, lossy sizes 1 to 16383 (VP8's 14-bit header), and quality 0 to 100;
+// anything else is .Invalid.
 
 MAX_ENCODE_SIZE :: 16384
 
@@ -40,14 +45,32 @@ write_file :: proc(path: string, pixels: []u8, width, height: int, pool: ^common
 	return os.write_entire_file(path, data) == nil ? .None : .Invalid
 }
 
+encode_lossy :: proc(pixels: []u8, width, height: int, quality := 75, pool: ^common.Work_Pool = nil, allocator := context.allocator) -> (data: []u8, err: Error) {
+	if !lossy_encodable(pixels, width, height, quality) do return nil, .Invalid
+	e: Lossy_Encoder
+	defer destroy_lossy_encoder(&e)
+	init_lossy_encoder(&e, allocator) or_return
+	write_lossy_still(&e, pixels, width * 4, width, height, quality, pool) or_return
+	return take_lossy_output(&e)
+}
+
+write_lossy_file :: proc(path: string, pixels: []u8, width, height: int, quality := 75, pool: ^common.Work_Pool = nil) -> Error {
+	data := encode_lossy(pixels, width, height, quality, pool) or_return
+	defer delete(data)
+	return os.write_entire_file(path, data) == nil ? .None : .Invalid
+}
+
 // An animation being written: each frame is the whole canvas, and what
 // changed since the frame before is what is stored.
 Animation_Writer :: struct {
 	encoder:       Lossless_Encoder,
+	lossy:         Lossy_Encoder,
 	width, height: int,
 	previous:      []u8, // the canvas as the last frame left it
 	frames:        int,
 	has_alpha:     bool,
+	lossy_ready:   bool,
+	prev_lossy:    bool,
 	pool:          ^common.Work_Pool,
 }
 
@@ -75,6 +98,7 @@ init_animation_writer :: proc(w: ^Animation_Writer, width, height: int, loop_cou
 destroy_animation_writer :: proc(w: ^Animation_Writer) {
 	delete(w.previous, w.encoder.w.out.allocator)
 	destroy_lossless_encoder(&w.encoder)
+	if w.lossy_ready do destroy_lossy_encoder(&w.lossy)
 	w^ = {}
 }
 
@@ -83,7 +107,7 @@ destroy_animation_writer :: proc(w: ^Animation_Writer) {
 write_frame :: proc(w: ^Animation_Writer, pixels: []u8, duration: int) -> Error {
 	if !encodable(pixels, w.width, w.height) || duration < 0 || duration > 0xffffff do return .Invalid
 	x0, y0, x1, y1 := 0, 0, w.width, w.height
-	if w.frames > 0 {
+	if w.frames > 0 && !w.prev_lossy {
 		x0, y0, x1, y1 = changed_rectangle(pixels, w.previous, w.width, w.height)
 		x0 &~= 1 // frame offsets are stored halved
 		y0 &~= 1
@@ -104,6 +128,45 @@ write_frame :: proc(w: ^Animation_Writer, pixels: []u8, duration: int) -> Error 
 	put_u32(out[start + 4:], u32(len(out) - start - 8))
 	for y in y0 ..< y1 do copy(w.previous[y * stride + x0 * 4:][:(x1 - x0) * 4], pixels[y * stride + x0 * 4:])
 	w.has_alpha ||= w.encoder.has_alpha
+	w.prev_lossy = false
+	w.frames += 1
+	return .None
+}
+
+// Adds a lossy VP8 (+ ALPH when non-opaque) frame for `duration` milliseconds.
+write_lossy_frame :: proc(w: ^Animation_Writer, pixels: []u8, duration: int, quality := 75) -> Error {
+	if !encodable(pixels, w.width, w.height) || duration < 0 || duration > 0xffffff || quality < 0 || quality > 100 do return .Invalid
+	x0, y0, x1, y1 := 0, 0, w.width, w.height
+	if w.frames > 0 {
+		x0, y0, x1, y1 = changed_rectangle(pixels, w.previous, w.width, w.height)
+		x0 &~= 1
+		y0 &~= 1
+		x1 = min((x1 + 1) &~ 1, w.width)
+		y1 = min((y1 + 1) &~ 1, w.height)
+	}
+	fw, fh := x1 - x0, y1 - y0
+	if fw > MAX_LOSSY_SIZE || fh > MAX_LOSSY_SIZE do return .Invalid
+	if !w.lossy_ready {
+		init_lossy_encoder(&w.lossy, w.encoder.w.out.allocator) or_return
+		w.lossy_ready = true
+	}
+	out := &w.encoder.w.out
+	header := [24]u8{}
+	copy(header[:], "ANMF")
+	put_u24(header[8:], u32(x0 / 2))
+	put_u24(header[11:], u32(y0 / 2))
+	put_u24(header[14:], u32(fw - 1))
+	put_u24(header[17:], u32(fh - 1))
+	put_u24(header[20:], u32(duration))
+	header[23] = 0x02 // do not blend, do not dispose
+	start := len(out)
+	if _, e := append(out, ..header[:]); e != nil do return .Out_Of_Memory
+	stride := w.width * 4
+	write_lossy_anmf(&w.lossy, out, pixels[y0 * stride + x0 * 4:], stride, fw, fh, quality, w.pool) or_return
+	put_u32(out[start + 4:], u32(len(out) - start - 8))
+	for y in y0 ..< y1 do copy(w.previous[y * stride + x0 * 4:][:(fw * 4)], pixels[y * stride + x0 * 4:])
+	w.has_alpha ||= w.lossy.has_alpha
+	w.prev_lossy = true
 	w.frames += 1
 	return .None
 }
@@ -122,6 +185,11 @@ finish_animation :: proc(w: ^Animation_Writer) -> (data: []u8, err: Error) {
 @(private)
 encodable :: proc(pixels: []u8, width, height: int) -> bool {
 	return width >= 1 && height >= 1 && width <= MAX_ENCODE_SIZE && height <= MAX_ENCODE_SIZE && len(pixels) >= width * height * 4
+}
+
+@(private)
+lossy_encodable :: proc(pixels: []u8, width, height, quality: int) -> bool {
+	return width >= 1 && height >= 1 && width <= MAX_LOSSY_SIZE && height <= MAX_LOSSY_SIZE && quality >= 0 && quality <= 100 && len(pixels) >= width * height * 4
 }
 
 // The smallest rectangle outside which two canvases are equal; one pixel

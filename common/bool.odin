@@ -75,3 +75,61 @@ bool_tree :: #force_inline proc "contextless" (b: ^Bool_Decoder, tree: []i8, pro
 bool_overrun :: #force_inline proc "contextless" (b: ^Bool_Decoder) -> bool {
 	return b.pos - b.bits / 8 > len(b.data) + 8
 }
+
+// Boolean (arithmetic) encoder paired with Bool_Decoder: the inverse range
+// subdivision of RFC 6386 section 7.3 and VP9 section 9.2, with carry
+// propagation across pending 0xff bytes.
+Bool_Encoder :: struct {
+	data:       [dynamic]u8,
+	low, range: u32,
+	count:      int,
+	failed:     bool, // an append ran out of memory
+}
+
+bool_encode_start :: proc(b: ^Bool_Encoder) {
+	clear(&b.data)
+	b.low, b.range, b.count, b.failed = 0, 255, -24, false
+}
+
+@(private)
+bool_encode_byte :: #force_no_inline proc(b: ^Bool_Encoder, shift: int) #no_bounds_check {
+	offset := shift - b.count
+	if (b.low << uint(offset - 1)) & 0x80000000 != 0 {
+		at := len(b.data) - 1
+		for at >= 0 && b.data[at] == 255 {b.data[at] = 0; at -= 1}
+		assert(at >= 0 || b.failed)
+		if at >= 0 do b.data[at] += 1
+	}
+	if _, err := non_zero_append(&b.data, u8(b.low >> uint(24 - offset))); err != nil do b.failed = true
+	b.low <<= uint(offset)
+	rem := b.count
+	b.low &= 0xffffff
+	b.count -= 8
+	b.low <<= uint(rem)
+}
+
+// Encodes one bit (0 or non-zero) with probability prob/256 of being 0.
+bool_encode :: #force_inline proc(b: ^Bool_Encoder, bit: int, prob: u8) {
+	split := 1 + (((b.range - 1) * u32(prob)) >> 8)
+	b.low += bit != 0 ? split : 0
+	b.range = bit != 0 ? b.range - split : split
+	shift := int(intrinsics.count_leading_zeros(b.range) - 24)
+	b.range <<= uint(shift)
+	b.count += shift
+	if b.count >= 0 {
+		bool_encode_byte(b, shift)
+		return
+	}
+	b.low <<= uint(shift)
+}
+
+// An n-bit unsigned literal, most significant bit first, at probability 128.
+bool_encode_literal :: #force_inline proc(b: ^Bool_Encoder, value, bits: int) {
+	for i := bits - 1; i >= 0; i -= 1 do bool_encode(b, (value >> uint(i)) & 1, 128)
+}
+
+// Flushes the encoder's pending window to `b.data`.
+bool_encode_finish :: proc(b: ^Bool_Encoder) {
+	if b.range == 255 do bool_encode(b, 0, 128)
+	for _ in 0 ..< 32 do bool_encode(b, 0, 128)
+}

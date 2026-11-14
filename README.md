@@ -32,7 +32,7 @@ Images:
 - `image/gif`: GIF decoding, the first frame or the animation composited as browsers show it ([README](image/gif/README.md)).
 - `image/bmp`: BMP decoding by stb_image's rules ([README](image/bmp/README.md)).
 - `image/png/encoder`: PNG writing ([README](image/png/README.md)).
-- `image/webp`: WebP lossy, lossless, alpha and animation to RGBA8, and lossless WebP writing, still and animated ([README](image/webp/README.md)).
+- `image/webp`: WebP lossy, lossless, alpha and animation to RGBA8 and back ([README](image/webp/README.md)).
 - `image/hdr`: Radiance RGBE to linear RGBA f32, identical to stb_image's `stbi_loadf` ([README](image/hdr/README.md)).
 
 Containers:
