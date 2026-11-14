@@ -190,7 +190,9 @@ destroy_image :: proc(img: ^Image, allocator := context.allocator) {
 	img^ = {}
 }
 
-// PNG writing, for the suite's frames, snapshots and exports.
+// PNG writing, for the suite's frames, snapshots and exports. Pass
+// `premultiplied = true` for premultiplied RGBA: alpha is divided out row by
+// row as the file is written, with no copy of the frame.
 encode_png :: png_encoder.encode
 write_png :: png_encoder.write_file
 

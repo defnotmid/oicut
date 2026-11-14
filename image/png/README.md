@@ -13,10 +13,14 @@ import png "../png/encoder"
 
 data, err := png.encode(pixels, width, height)   // the file's bytes; delete when done
 err = png.write_file("frame.png", pixels, width, height)
+err = png.write_file("frame.png", premultiplied_pixels, width, height, premultiplied = true)
 ```
 
 `pixels` holds at least `width * height * 4` bytes; anything else returns
-`Invalid_Argument`.
+`Invalid_Argument`. PNG stores straight alpha. With `premultiplied = true`,
+each row is un-premultiplied into a row buffer as it is filtered, so the
+frame is never copied: alpha 0 and 255 pass through, and otherwise R, G and B
+become `min((c * 255 + a / 2) / a, 255)`. The caller's pixels are not changed.
 
 ## Verification
 
@@ -25,4 +29,5 @@ err = png.write_file("frame.png", pixels, width, height)
   its output is byte-identical to ovg's `encode_png` at the same speed
   (20.8 ms for 1920×1080, 482 ms for 11158×2156 on one Ryzen 9 9900X3D core).
 - `odin test image/png/encoder`: encodes of several sizes decode through
-  `core:image/png` to the same pixels.
+  `core:image/png` to the same pixels; premultiplied pixels with every
+  alpha from 0 to 255 write the same file as those pixels un-premultiplied first.

@@ -14,23 +14,26 @@ Error :: enum {
 // Writes tightly packed top-down RGBA8 pixels as a PNG file: every row
 // Paeth-filtered, deflated as runs of the previous byte (deflate.odin; on
 // rendered frames several times faster than stb_image_write and smaller),
-// streamed out as IDAT chunks of about PNG_CHUNK bytes.
-write_file :: proc(path: string, pixels: []u8, width, height: int) -> Error {
+// streamed out as IDAT chunks of about PNG_CHUNK bytes. With `premultiplied`,
+// the pixels' colour is taken as multiplied by alpha and divided out row by
+// row as it is filtered (see unpremultiply_row); the caller's pixels are not
+// changed.
+write_file :: proc(path: string, pixels: []u8, width, height: int, premultiplied := false) -> Error {
 	if !valid(pixels, width, height) do return .Invalid_Argument
 	f, ferr := os.create(path)
 	if ferr != nil do return .IO_Error
 	defer os.close(f)
-	return write(pixels, width, height, f, proc(f: rawptr, data: []u8) -> bool {
+	return write(pixels, width, height, premultiplied, f, proc(f: rawptr, data: []u8) -> bool {
 		_, err := os.write((^os.File)(f), data)
 		return err == nil
 	})
 }
 
 // write_file's encoding into memory: the PNG file's bytes.
-encode :: proc(pixels: []u8, width, height: int, allocator := context.allocator) -> ([]u8, Error) {
+encode :: proc(pixels: []u8, width, height: int, allocator := context.allocator, premultiplied := false) -> ([]u8, Error) {
 	if !valid(pixels, width, height) do return nil, .Invalid_Argument
 	out := make([dynamic]u8, allocator)
-	err := write(pixels, width, height, &out, proc(out: rawptr, data: []u8) -> bool {
+	err := write(pixels, width, height, premultiplied, &out, proc(out: rawptr, data: []u8) -> bool {
 		_, err := append((^[dynamic]u8)(out), ..data)
 		return err == nil
 	})
@@ -47,7 +50,7 @@ valid :: proc(pixels: []u8, width, height: int) -> bool {
 }
 
 @(private)
-write :: proc(pixels: []u8, width, height: int, ctx: rawptr, sink: proc(ctx: rawptr, data: []u8) -> bool) -> Error {
+write :: proc(pixels: []u8, width, height: int, premultiplied: bool, ctx: rawptr, sink: proc(ctx: rawptr, data: []u8) -> bool) -> Error {
 	stride := width * 4
 	ok := sink(ctx, {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
 	head: [8 + 13 + 4]u8
@@ -62,13 +65,21 @@ write :: proc(pixels: []u8, width, height: int, ctx: rawptr, sink: proc(ctx: raw
 	z: Deflate
 	deflate_init(&z, 8)
 	defer deflate_destroy(&z)
-	rows := make([]u8, stride * 2 + 1)
+	// A zero row above the first, the filtered row, and with `premultiplied`
+	// the current and previous rows with alpha divided out.
+	rows := make([]u8, stride * (premultiplied ? 4 : 2) + 1)
 	defer delete(rows)
-	zero, row := rows[:stride], rows[stride:]
+	zero, row, straight := rows[:stride], rows[stride:][:stride + 1], rows[stride * 2 + 1:]
+	prev := zero
 	for y in 0 ..< height {
 		cur := pixels[y * stride:][:stride]
-		prev := y > 0 ? pixels[(y - 1) * stride:][:stride] : zero
+		if premultiplied {
+			dst := straight[(y & 1) * stride:][:stride]
+			unpremultiply_row(dst, cur)
+			cur = dst
+		}
 		filter_paeth(row, cur, prev)
+		prev = cur
 		deflate_write(&z, row)
 		if len(z.out) - 8 >= CHUNK && ok {
 			ok &&= idat(&z, ctx, sink)
@@ -116,5 +127,20 @@ filter_paeth :: proc "contextless" (dst, cur, prev: []u8) {
 		pa, pb, pc := abs(b - c), abs(a - c), abs(a + b - 2 * c)
 		p := pa <= pb && pa <= pc ? a : pb <= pc ? b : c
 		dst[1 + i] = cur[i] - u8(p)
+	}
+}
+
+// Straight colour from premultiplied: alpha 0 and 255 pass through, and
+// otherwise each of R, G and B becomes min((c * 255 + a / 2) / a, 255).
+@(private)
+unpremultiply_row :: proc "contextless" (dst, src: []u8) {
+	for i := 0; i < len(src); i += 4 {
+		a := u32(src[i + 3])
+		if a == 0 || a == 255 {
+			copy(dst[i:][:4], src[i:][:4])
+			continue
+		}
+		for k in 0 ..< 3 do dst[i + k] = u8(min((u32(src[i + k]) * 255 + a / 2) / a, 255))
+		dst[i + 3] = u8(a)
 	}
 }
