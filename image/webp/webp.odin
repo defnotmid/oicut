@@ -94,6 +94,29 @@ riff_body :: proc(data: []u8) -> (body: []u8, err: Error) {
 	return data[12:8 + size], .None
 }
 
+// A file's metadata chunks as they are stored: slices of the file, empty
+// when it has none. The ICC profile is not applied to the decoded pixels.
+Metadata :: struct {
+	icc:  []u8,
+	exif: []u8,
+	xmp:  []u8,
+}
+
+get_metadata :: proc(data: []u8) -> (m: Metadata, err: Error) {
+	rest := riff_body(data) or_return
+	for c in next_chunk(&rest) {
+		switch c.fourcc {
+		case "ICCP":
+			m.icc = c.payload
+		case "EXIF":
+			m.exif = c.payload
+		case "XMP ":
+			m.xmp = c.payload
+		}
+	}
+	return m, .None
+}
+
 // A still image's frame (or a frame's ANMF payload): optional ALPH, then
 // VP8 or VP8L, other chunks skipped.
 @(private)
