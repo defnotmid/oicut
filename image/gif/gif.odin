@@ -200,7 +200,9 @@ decode_into :: proc(data: []u8, pixels: []u8) -> Error {
 			}
 		}
 	}
-	draw(pixels, p.width, f, indices[:coded])
+	// Every coded pixel is the frame's, a transparent one too: stb gives the
+	// background only to pixels the data never reached.
+	draw(pixels, p.width, f, indices[:coded], clear = true)
 	return .None
 }
 
@@ -210,16 +212,17 @@ destroy_image :: proc(img: ^Image, allocator := context.allocator) {
 }
 
 // Draws a frame's colour indices, as coded, onto an RGBA canvas `canvas_width`
-// wide, a pixel only where its colour is opaque: an interlaced frame's rows
-// come in four passes. A frame whose data ended early leaves the rest of its
-// rectangle as it was, as stb does.
+// wide, a pixel only where its colour is opaque, or with `clear` every coded
+// pixel, the others as transparent black: an interlaced frame's rows come in
+// four passes. A frame whose data ended early leaves the rest of its rectangle
+// as it was, as stb does.
 @(private)
-draw :: proc(canvas: []u8, canvas_width: int, f: ^Frame_Record, indices: []u8) #no_bounds_check {
-	// The frame's colours as RGBA, alpha 0 where nothing is drawn: the
-	// transparent index and indices past the table.
+draw :: proc(canvas: []u8, canvas_width: int, f: ^Frame_Record, indices: []u8, clear := false) #no_bounds_check {
+	// The frame's colours as RGBA, transparent black where nothing is drawn:
+	// the transparent index and indices past the table.
 	colours: [256][4]u8
 	for i in 0 ..< len(f.palette) / 3 do colours[i] = {f.palette[i * 3], f.palette[i * 3 + 1], f.palette[i * 3 + 2], 255}
-	if f.transparent >= 0 do colours[f.transparent].a = 0
+	if f.transparent >= 0 do colours[f.transparent] = {}
 	pixels := slice.reinterpret([][4]u8, canvas)
 	// Each pass's first row and step.
 	@(static, rodata) interlaced := [4][2]int{{0, 8}, {4, 8}, {2, 4}, {1, 2}}
@@ -229,9 +232,13 @@ draw :: proc(canvas: []u8, canvas_width: int, f: ^Frame_Record, indices: []u8) #
 		for y := pass[0]; y < f.height && at < len(indices); y += pass[1] {
 			n := min(f.width, len(indices) - at)
 			dst := pixels[(f.y + y) * canvas_width + f.x:][:n]
-			for v, i in indices[at:][:n] {
-				c := colours[v]
-				if c.a != 0 do dst[i] = c
+			if clear {
+				for v, i in indices[at:][:n] do dst[i] = colours[v]
+			} else {
+				for v, i in indices[at:][:n] {
+					c := colours[v]
+					if c.a != 0 do dst[i] = c
+				}
 			}
 			at += n
 		}

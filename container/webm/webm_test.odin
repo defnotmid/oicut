@@ -267,16 +267,26 @@ lc_config_with_explicit_rate :: proc(t: ^testing.T) {
 	testing.expect_value(t, bits >> 3 & 15, 1)
 }
 
-// One track's bad sampling frequency loses that value, not the file; a repeated
-// CodecID or CodecPrivate frees what it replaces.
+// One track's bad sampling frequency, or one of 3 or 10 bytes, loses that
+// value, not the file; a repeated CodecID or CodecPrivate frees what it
+// replaces.
 @(test)
 a_bad_sampling_frequency_keeps_the_file :: proc(t: ^testing.T) {
 	Case :: struct {
 		rate: f64,
 		want: int,
+		raw:  []u8, // the element's bytes instead, of a size no float has
 	}
 	zero := 0.0
-	cases := [?]Case{{48000, 48000}, {0, 0}, {-48000, 0}, {1e12, 0}, {zero / zero, 0}}
+	cases := [?]Case {
+		{48000, 48000, nil},
+		{0, 0, nil},
+		{-48000, 0, nil},
+		{1e12, 0, nil},
+		{zero / zero, 0, nil},
+		{0, 0, {0x47, 0x3b, 0x80}},
+		{0, 0, {0x40, 0xe7, 0x70, 0, 0, 0, 0, 0, 0, 0}},
+	}
 	for c in cases {
 		doc, header, segment, tracks, track, audio, video_track, video: [dynamic]u8
 		defer {delete(doc); delete(header); delete(segment); delete(tracks); delete(track); delete(audio); delete(video_track); delete(video)}
@@ -289,7 +299,11 @@ a_bad_sampling_frequency_keeps_the_file :: proc(t: ^testing.T) {
 		element(&video_track, u32(ID.Codec_ID), transmute([]u8)string("V_VP9"))
 		element(&video_track, u32(ID.Video), video[:])
 		element(&tracks, u32(ID.Track_Entry), video_track[:])
-		uint_element(&audio, u32(ID.Sampling_Frequency), transmute(u64)c.rate)
+		if c.raw != nil {
+			element(&audio, u32(ID.Sampling_Frequency), c.raw)
+		} else {
+			uint_element(&audio, u32(ID.Sampling_Frequency), transmute(u64)c.rate)
+		}
 		uint_element(&audio, u32(ID.Channels), 2)
 		uint_element(&track, u32(ID.Track_Number), 2)
 		uint_element(&track, u32(ID.Track_Type), 2)

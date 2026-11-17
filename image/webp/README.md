@@ -61,6 +61,7 @@ encoder's choice of predictors run on it, row by row, deterministically.
 - **Not read:** raw VP8/VP8L bitstreams without the RIFF container. The ICC profile is returned, not applied (sRGB is assumed).
 - **Damaged input:**
   - a file shorter than its RIFF size is refused (`.Invalid`), by `get_features` too, as libwebp refuses to decode it;
+  - a RIFF size that ends inside a chunk is refused (`.Invalid`), as `dwebp` and `anim_dump` refuse it: for a still, any chunk up to its bitstream (libwebp reads no further, so a chunk after the image may overrun); for an animation and `get_metadata`, any chunk;
   - inside a whole file, a lossy chunk with no room for its first partition, partition sizes or last partition is refused (`.Invalid`), and a partition that runs out after that decodes as zeros, as a damaged frame would;
   - inside a whole file, a lossless stream that runs out is refused (`.Invalid`).
 

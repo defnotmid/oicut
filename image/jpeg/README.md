@@ -57,6 +57,10 @@ libjpeg-turbo smooths the blocks of a progressive image whose scans stop
 before refining the low AC coefficients. oicut does not, so such files
 differ. Complete progressive files are identical.
 
+A file that ends without its EOI marker decodes from the scans it has, as
+libjpeg-turbo's `djpeg` does with a warning. stb_image skips its final pass in
+that case, so for progressive files it returns pixels it never computed.
+
 ## Verification
 
 `tests/image_check.sh` fetches the pinned libjpeg-turbo, builds it into

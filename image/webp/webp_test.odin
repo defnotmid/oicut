@@ -58,3 +58,38 @@ a_cut_off_file_is_refused :: proc(t: ^testing.T) {
 	defer destroy_image(&again)
 	testing.expect(t, string(again.pixels) == string(img.pixels))
 }
+
+// A RIFF size that ends inside the VP8 chunk is refused, as dwebp refuses it,
+// although the bytes are there; a chunk after the image may run past the RIFF
+// size, as libwebp never reads it, but get_metadata then refuses the file.
+@(test)
+a_riff_size_inside_a_chunk :: proc(t: ^testing.T) {
+	img, err := decode(lossy[:])
+	testing.expect_value(t, err, Error.None)
+	defer destroy_image(&img)
+	short := make([]u8, len(lossy))
+	defer delete(short)
+	copy(short, lossy[:])
+	riff := len(lossy) - 8
+	for size in 4 ..< riff {
+		short[4], short[5] = u8(size), u8(size >> 8)
+		_, err = decode(short)
+		testing.expectf(t, err == .Invalid, "RIFF size %d of %d: %v", size, riff, err)
+		_, err = get_features(short)
+		testing.expectf(t, err == .Invalid, "features, RIFF size %d of %d: %v", size, riff, err)
+	}
+	trailing := make([dynamic]u8)
+	defer delete(trailing)
+	append(&trailing, ..lossy[:])
+	append(&trailing, "JUNK")
+	append(&trailing, 100, 0, 0, 0, 1, 2, 3, 4)
+	size := len(trailing) - 8
+	trailing[4], trailing[5] = u8(size), u8(size >> 8)
+	again: Image
+	again, err = decode(trailing[:])
+	testing.expect_value(t, err, Error.None)
+	defer destroy_image(&again)
+	testing.expect(t, string(again.pixels) == string(img.pixels))
+	_, err = get_metadata(trailing[:])
+	testing.expect_value(t, err, Error.Invalid)
+}

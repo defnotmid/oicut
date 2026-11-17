@@ -102,6 +102,12 @@ baseline_and_progressive_match_libjpeg_turbo :: proc(t: ^testing.T) {
 		testing.expect_value(t, err, Error.None)
 		testing.expectf(t, fnv(img.pixels) == TURBO_HASH, "file %d: hash %x", k, fnv(img.pixels))
 	}
+	// Without its EOI marker the progressive file decodes the same, as
+	// libjpeg-turbo's djpeg decodes it.
+	img, err := decode(PROGRESSIVE[:len(PROGRESSIVE) - 2])
+	defer destroy_image(&img)
+	testing.expect_value(t, err, Error.None)
+	testing.expectf(t, fnv(img.pixels) == TURBO_HASH, "progressive without EOI: hash %x", fnv(img.pixels))
 }
 
 // The same IDCT arithmetic, one sample at a time, against the lanes.

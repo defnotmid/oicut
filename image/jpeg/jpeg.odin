@@ -369,10 +369,10 @@ read_scans :: proc(d: ^Decoder) -> Error {
 		}
 		for m != 0xDA {
 			switch m {
-			case 0xD9:
+			case 0xD9, MARKER_NONE:
+				// The data may end without EOI: the image is what its scans
+				// gave, as libjpeg-turbo decodes it.
 				return .None
-			case MARKER_NONE:
-				return .Invalid
 			case 0xDC: // number of lines
 				if u16_at(d) != 4 || u16_at(d) != d.features.height do return .Invalid
 			case:

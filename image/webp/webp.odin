@@ -57,15 +57,16 @@ Chunk :: struct {
 	payload: []u8,
 }
 
-// The RIFF chunks after the header, padded to even sizes; a last chunk claiming
-// more than the RIFF holds keeps what is there.
+// The RIFF chunks after the header, padded to even sizes (the last one's pad
+// byte may be missing). The walk stops at a chunk that claims more than is
+// left (see chunks_fit).
 @(private)
 next_chunk :: proc(data: ^[]u8) -> (c: Chunk, ok: bool) {
 	if len(data) < 8 do return
 	c.fourcc = string(data[:4])
 	size := int(le32(data[4:]))
 	rest := data[8:]
-	size = min(size, len(rest))
+	if size > len(rest) do return
 	c.payload = rest[:size]
 	data^ = rest[min(size + (size & 1), len(rest)):]
 	return c, true
@@ -94,6 +95,23 @@ riff_body :: proc(data: []u8) -> (body: []u8, err: Error) {
 	return data[12:8 + size], .None
 }
 
+// Whether every chunk in `data` ends inside it, the last one's pad byte aside.
+// A RIFF size that ends inside a chunk is refused, as libwebp refuses it: the
+// bytes past it are not the chunk's, and a lossy partition cut short decodes to
+// wrong pixels without an error. A still image needs this only up to its
+// bitstream (find_frame stops there, and libwebp reads no further); an
+// animation and the metadata need it of every chunk, as libwebp's demuxer does.
+@(private)
+chunks_fit :: proc(data: []u8) -> bool {
+	rest := data
+	for len(rest) >= 8 {
+		size := int(le32(rest[4:]))
+		if size > len(rest) - 8 do return false
+		rest = rest[min(8 + size + (size & 1), len(rest)):]
+	}
+	return true
+}
+
 // A file's metadata chunks as they are stored: slices of the file, empty
 // when it has none. The ICC profile is not applied to the decoded pixels.
 Metadata :: struct {
@@ -104,6 +122,7 @@ Metadata :: struct {
 
 get_metadata :: proc(data: []u8) -> (m: Metadata, err: Error) {
 	rest := riff_body(data) or_return
+	if !chunks_fit(rest) do return m, .Invalid
 	for c in next_chunk(&rest) {
 		switch c.fourcc {
 		case "ICCP":
@@ -175,6 +194,7 @@ get_features :: proc(data: []u8) -> (ft: Features, err: Error) {
 	ft.animated = flags & 0x02 != 0
 	ft.width, ft.height = le24(x[4:]) + 1, le24(x[7:]) + 1
 	if u64(ft.width) * u64(ft.height) >= 1 << 32 do return ft, .Invalid
+	if ft.animated && !chunks_fit(rest) do return ft, .Invalid
 	if !ft.animated {
 		f, found := find_frame(rest)
 		if !found do return ft, .Invalid

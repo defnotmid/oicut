@@ -322,3 +322,31 @@ short_first_frames_show_the_background :: proc(t: ^testing.T) {
 	testing.expect(t, slice.equal(img.pixels, want[:]))
 	destroy_image(&img)
 }
+
+// A coded pixel of the transparent colour in a first frame that ends early
+// stays clear: stb gives the background only to pixels the data never reached.
+@(test)
+short_first_frames_keep_coded_transparency :: proc(t: ^testing.T) {
+	indices := [6]u8{3, 0, 3, 3, 0, 3}
+	frames := [1]Test_Frame{{width = 4, height = 4, indices = indices[:], transparent = 0}}
+	data := write(4, 4, 0, frames[:])
+	defer delete(data)
+	data[11] = 1 // the logical screen's background index: green
+	img, err := decode(data[:])
+	testing.expect_value(t, err, Error.None)
+	defer destroy_image(&img)
+	want := picture("W.WW .WGG GGGG GGGG")
+	defer delete(want)
+	testing.expectf(t, slice.equal(img.pixels, want[:]), "%v", img.pixels)
+
+	// Interlaced, on the background-filled canvas: the data covers row 0
+	// (pass 1) and half of row 2 (pass 3; pass 2's row 4 does not exist).
+	colours := [?]u8{255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255}
+	f := Frame_Record{width = 4, height = 4, interlaced = true, palette = colours[:], transparent = 0}
+	canvas := picture("GGGG GGGG GGGG GGGG")
+	defer delete(canvas)
+	draw(canvas[:], 4, &f, indices[:], clear = true)
+	want_interlaced := picture("W.WW GGGG .WGG GGGG")
+	defer delete(want_interlaced)
+	testing.expectf(t, slice.equal(canvas[:], want_interlaced[:]), "interlaced: %v", canvas[:])
+}

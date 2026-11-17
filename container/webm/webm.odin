@@ -668,9 +668,11 @@ parse_track :: proc(r: ^Reader, t: ^Track, entry: Element) -> Error {
 				c := read_element(r, a, e.end) or_return
 				#partial switch ID(c.id) {
 				case .Sampling_Frequency:
-					// One track's bad rate is no reason to lose the file: as if absent.
-					rate := read_float(r, c) or_return
-					if rate > 0 && rate <= 1e7 do t.sample_rate = int(rate)
+					// One track's bad rate, or a rate of a size no float has, is no
+					// reason to lose the file: as if absent.
+					rate, rerr := read_float(r, c)
+					if rerr != .None && rerr != .Invalid_Data do return rerr
+					if rerr == .None && rate > 0 && rate <= 1e7 do t.sample_rate = int(rate)
 				case .Channels:
 					t.channels = int(read_uint(r, c) or_return)
 				case .Bit_Depth:
