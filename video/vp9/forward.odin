@@ -182,6 +182,10 @@ forward_lossy :: proc(block: []i32, tx_type: int, $n: uint, $E: typeid) #no_boun
 	L :: min(N, MAX_L)
 	Vec :: #simd[L]E
 	W :: #simd[L]i32
+	// The 32x32 row pass is 64-bit: in 32 bits it overflows once a flat
+	// residual passes 128, and the DC takes the wrong sign. The columns fit in
+	// 32 bits (forward_extremes_do_not_overflow compares them with 64-bit).
+	Row :: #simd[L](i64 when n == 5 else E)
 	vertical_adst := n < 5 && (tx_type == ADST_DCT || tx_type == ADST_ADST)
 	horizontal_adst := n < 5 && (tx_type == DCT_ADST || tx_type == ADST_ADST)
 	t: [N]Vec = ---
@@ -201,7 +205,7 @@ forward_lossy :: proc(block: []i32, tx_type: int, $n: uint, $E: typeid) #no_boun
 			intrinsics.unaligned_store((^W)(&block[i * N]), W(out))
 		}
 	} else {
-		t_cols: [N / L][N]Vec = ---
+		t_cols: [N / L][N]Row = ---
 		for jb := 0; jb < N; jb += L {
 			#unroll for i in 0 ..< N {
 				t[i] = Vec(intrinsics.unaligned_load((^W)(&block[i * N + jb]))) * 4
@@ -215,14 +219,14 @@ forward_lossy :: proc(block: []i32, tx_type: int, $n: uint, $E: typeid) #no_boun
 					tile[l] = v
 				}
 				tile = common.transpose(tile)
-				#unroll for k in 0 ..< L do t_cols[gb][jb + k] = tile[k]
+				#unroll for k in 0 ..< L do t_cols[gb][jb + k] = Row(tile[k])
 			}
 		}
 		for gb in 0 ..< N / L {
 			row_vec := &t_cols[gb]
 			if horizontal_adst {fadst(row_vec, n)} else {fdct(row_vec, n)}
 			#unroll for jb in 0 ..< N / L {
-				tile: [L]Vec = ---
+				tile: [L]Row = ---
 				#unroll for k in 0 ..< L {
 					v := row_vec[jb * L + k]
 					when n == 4 {
