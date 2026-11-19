@@ -282,7 +282,11 @@ forward_transform_2d :: proc(block: []i32, tx_size, tx_type: int, lossless: bool
 		forward_wht4x4(block)
 		return
 	}
-	if bit_depth > 8 {
+	// A 64-point pass is 64-bit at every depth: in 32 bits a flat 64x64, 32x64
+	// or 64x32 residual of 129 overflows it, and the DC takes the wrong sign.
+	// The encoder codes none of them (it stops at 32x32), but the transform is
+	// public.
+	if bit_depth > 8 || TX_WIDTH_LOG2[tx_size] == 6 || TX_HEIGHT_LOG2[tx_size] == 6 {
 		ftx_2d_lanes(block, tx_size, tx_type, i64)
 	} else {
 		ftx_2d_lanes(block, tx_size, tx_type, i32)

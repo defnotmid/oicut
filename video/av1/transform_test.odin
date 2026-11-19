@@ -133,3 +133,30 @@ test_forward_inverse_roundtrip_all_sizes_and_types :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+// The largest residuals, flat and alternating, give the same coefficients at
+// 8 bits as in the 64-bit high-depth arithmetic: none overflows. A flat 64x64,
+// 32x64 or 64x32 residual of 129 once overflowed the 64-point row pass.
+@(test)
+test_forward_extremes_do_not_overflow :: proc(t: ^testing.T) {
+	narrow := make([]i32, 64 * 64)
+	wide := make([]i32, 64 * 64)
+	defer delete(narrow)
+	defer delete(wide)
+	for tx_size in 0 ..< TX_SIZES_ALL {
+		w, h := int(TX_WIDTH[tx_size]), int(TX_HEIGHT[tx_size])
+		max_dim := max(w, h)
+		for tx_type in 0 ..< TX_TYPES {
+			if max_dim == 64 && tx_type != DCT_DCT do continue
+			if max_dim == 32 && tx_type != DCT_DCT && tx_type != IDTX do continue
+			for checker in ([2]bool{false, true}) do for amp in ([6]i32{255, -255, 129, -129, 128, -128}) {
+				for y in 0 ..< h do for x in 0 ..< w do narrow[y * w + x] = checker && (x + y) & 1 == 1 ? -amp : amp
+				copy(wide[:w * h], narrow[:w * h])
+				forward_transform_2d(narrow[:w * h], tx_size, tx_type, false, 8)
+				forward_transform_2d(wide[:w * h], tx_size, tx_type, false, 10)
+				for i in 0 ..< w * h do if !testing.expectf(t, narrow[i] == wide[i], "tx %d type %d amplitude %d checker %v at %d", tx_size, tx_type, amp, checker, i) do return
+				if tx_type == DCT_DCT && !checker do testing.expectf(t, amp > 0 ? narrow[0] > 0 : narrow[0] < 0, "tx %d amplitude %d: DC %d", tx_size, amp, narrow[0])
+			}
+		}
+	}
+}

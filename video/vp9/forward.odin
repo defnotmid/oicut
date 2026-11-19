@@ -182,10 +182,6 @@ forward_lossy :: proc(block: []i32, tx_type: int, $n: uint, $E: typeid) #no_boun
 	L :: min(N, MAX_L)
 	Vec :: #simd[L]E
 	W :: #simd[L]i32
-	// The 32x32 row pass is 64-bit: in 32 bits it overflows once a flat
-	// residual passes 128, and the DC takes the wrong sign. The columns fit in
-	// 32 bits (forward_extremes_do_not_overflow compares them with 64-bit).
-	Row :: #simd[L](i64 when n == 5 else E)
 	vertical_adst := n < 5 && (tx_type == ADST_DCT || tx_type == ADST_ADST)
 	horizontal_adst := n < 5 && (tx_type == DCT_ADST || tx_type == ADST_ADST)
 	t: [N]Vec = ---
@@ -205,6 +201,11 @@ forward_lossy :: proc(block: []i32, tx_type: int, $n: uint, $E: typeid) #no_boun
 			intrinsics.unaligned_store((^W)(&block[i * N]), W(out))
 		}
 	} else {
+		// The 32x32 row pass is 64-bit: in 32 bits a flat residual of 128 (or
+		// -129) overflows it, and the DC takes the wrong sign. The columns fit
+		// in 32 bits, as do the rounded row outputs, which are transposed as
+		// i32 (forward_extremes_do_not_overflow compares them with 64-bit).
+		Row :: #simd[L](i64 when n == 5 else E)
 		t_cols: [N / L][N]Row = ---
 		for jb := 0; jb < N; jb += L {
 			#unroll for i in 0 ..< N {
@@ -226,7 +227,7 @@ forward_lossy :: proc(block: []i32, tx_type: int, $n: uint, $E: typeid) #no_boun
 			row_vec := &t_cols[gb]
 			if horizontal_adst {fadst(row_vec, n)} else {fdct(row_vec, n)}
 			#unroll for jb in 0 ..< N / L {
-				tile: [L]Row = ---
+				tile: [L]W = ---
 				#unroll for k in 0 ..< L {
 					v := row_vec[jb * L + k]
 					when n == 4 {
@@ -234,10 +235,10 @@ forward_lossy :: proc(block: []i32, tx_type: int, $n: uint, $E: typeid) #no_boun
 					} else when n == 5 {
 						v = round2_lanes(v, 3)
 					}
-					tile[k] = v
+					tile[k] = W(v)
 				}
 				tile = common.transpose(tile)
-				#unroll for l in 0 ..< L do intrinsics.unaligned_store((^W)(&block[(gb * L + l) * N + jb * L]), W(tile[l]))
+				#unroll for l in 0 ..< L do intrinsics.unaligned_store((^W)(&block[(gb * L + l) * N + jb * L]), tile[l])
 			}
 		}
 	}

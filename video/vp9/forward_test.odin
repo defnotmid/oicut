@@ -29,13 +29,13 @@ forward_inverse_pair :: proc(t: ^testing.T) {
 
 // The largest residuals, flat and alternating, give the same coefficients at
 // 8 bits as in the 64-bit high-depth arithmetic: none overflows. A flat 32x32
-// residual of -141 once gave a positive DC and stray AC coefficients.
+// residual of 128 once overflowed, and one of -141 gave a DC of 14720 for -18048.
 @(test)
 forward_extremes_do_not_overflow :: proc(t: ^testing.T) {
 	f: Forward_Transforms
 	for tx in 0 ..< 4 {
 		n := 4 << uint(tx)
-		for kind in 0 ..< (tx == TX_32X32 ? 1 : 4) do for checker in ([2]bool{false, true}) do for amp in ([4]i32{255, -255, 141, -141}) {
+		for kind in 0 ..< (tx == TX_32X32 ? 1 : 4) do for checker in ([2]bool{false, true}) do for amp in ([6]i32{255, -255, 141, -141, 128, -129}) {
 			narrow, wide: [1024]i32
 			for y in 0 ..< n do for x in 0 ..< n do narrow[y * n + x] = checker && (x + y) & 1 == 1 ? -amp : amp
 			wide = narrow
@@ -43,7 +43,7 @@ forward_extremes_do_not_overflow :: proc(t: ^testing.T) {
 			forward_transform(&f, wide[:n * n], tx, kind, false, 10)
 			if !testing.expectf(t, narrow == wide, "tx %d type %d amplitude %d checker %v", tx, kind, amp, checker) do return
 			if kind == DCT_DCT && !checker {
-				testing.expectf(t, (narrow[0] > 0) == (amp > 0), "tx %d amplitude %d: DC %d", tx, amp, narrow[0])
+				testing.expectf(t, amp > 0 ? narrow[0] > 0 : narrow[0] < 0, "tx %d amplitude %d: DC %d", tx, amp, narrow[0])
 				for v in narrow[1:n * n] do if !testing.expectf(t, v == 0, "tx %d amplitude %d: an AC coefficient in a flat block", tx, amp) do return
 			}
 		}
