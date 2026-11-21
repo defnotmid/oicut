@@ -61,6 +61,12 @@ A file that ends without its EOI marker decodes from the scans it has, as
 libjpeg-turbo's `djpeg` does with a warning. stb_image skips its final pass in
 that case, so for progressive files it returns pixels it never computed.
 
+A sequential file may leave out its Huffman tables, as Motion-JPEG frames
+(webcams' MJPEG) do: where table 0 or 1 is undefined at the first scan it is
+Annex K's standard table, as in libjpeg-turbo. Any other undefined table a
+scan takes, and any in a progressive file, is `.Invalid`, as libjpeg-turbo
+refuses it.
+
 ## Verification
 
 `tests/image_check.sh` fetches the pinned libjpeg-turbo, builds it into
@@ -78,6 +84,8 @@ Against stb_image the same files are at least 58 dB PSNR. The fuzz pass
   libjpeg-turbo's output;
 - checks the SIMD IDCT against a scalar version of the same arithmetic;
 - decodes every truncation of both files.
+- decodes a Motion-JPEG frame with no DHT to libjpeg-turbo's pixels, and
+  refuses a scan whose tables are undefined.
 
 ## Speed
 

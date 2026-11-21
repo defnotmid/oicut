@@ -64,6 +64,7 @@ Decoder :: struct {
 	quant:        [4][8]#simd[8]u16, // natural order
 	dc_tables:    [4]Huffman,
 	ac_tables:    [4]Huffman,
+	defined:      [2]bit_set[0 ..< 4], // the tables a DHT (or standard_tables) gave, DC then AC
 	comps:        [4]Component,
 	h_max, v_max: int,
 	mcu_x, mcu_y: int, // MCUs across and down
@@ -130,6 +131,7 @@ decode_into :: proc(data: []u8, pixels: []u8, allocator := context.allocator) ->
 		read_segment(d, m) or_return
 		m = next_marker(d)
 	}
+	if !d.features.progressive do standard_tables(d)
 	read_scan_header(d) or_return
 	if !d.features.progressive && d.scan_n == d.features.components {
 		// One scan holds every component: band m is decoded, then band m - 1
@@ -258,6 +260,7 @@ read_segment :: proc(d: ^Decoder, m: int) -> Error {
 			build_huffman(h, counts) or_return
 			for i in 0 ..< n do h.values[i] = u8(byte_at(d))
 			if class == 1 do build_fast_ac(h)
+			d.defined[class] += {t}
 			left -= n
 		}
 		return left == 0 ? .None : .Invalid
@@ -409,6 +412,15 @@ read_scan_header :: proc(d: ^Decoder) -> Error {
 	} else {
 		if d.spec_start != 0 || d.succ_high != 0 || d.succ_low != 0 do return .Invalid
 		d.spec_end = 63
+	}
+	// Each table the scan decodes with must be defined, as libjpeg-turbo
+	// requires: DC and AC in a sequential scan, DC in a first DC scan, AC
+	// in an AC scan.
+	dc := !d.features.progressive || d.spec_start == 0 && d.succ_high == 0
+	ac := !d.features.progressive || d.spec_start > 0
+	for k in d.order[:d.scan_n] {
+		c := d.comps[k]
+		if dc && c.dc not_in d.defined[0] || ac && c.ac not_in d.defined[1] do return .Invalid
 	}
 	return .None
 }
